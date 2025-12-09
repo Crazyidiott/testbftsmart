@@ -61,6 +61,9 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class TOMLayer extends Thread implements RequestReceiver {
     private final Logger logger = LoggerFactory.getLogger(this.getClass());
 
+    // 添加这个公共变量用于统计
+    public long lcStartTime = 0; 
+
     private boolean doWork = true;
     //other components used by the TOMLayer (they are never changed)
     public ExecutionManager execManager; // Execution manager
@@ -398,23 +401,37 @@ public final class TOMLayer extends Thread implements RequestReceiver {
      * @return A value to be proposed to the acceptors
      */
     public byte[] createPropose(Decision dec) {
-        // Retrieve a set of pending requests from the clients manager
+        // 1. 安全获取 Pending Requests
         RequestList pendingRequests = clientsManager.getPendingRequests();
-
-        logger.debug("Number of pending requets to propose in consensus {}: {}", dec.getConsensusId(), pendingRequests.size());
-
-        int numberOfMessages = pendingRequests.size(); // number of messages retrieved
-        int numberOfNonces = this.controller.getStaticConf().getNumberOfNonces(); // ammount of nonces to be generated
-
-        //for benchmarking
-        if (dec.getConsensusId() > -1) { // if this is from the leader change, it doesnt matter
-            dec.firstMessageProposed = pendingRequests.getFirst();
-            dec.firstMessageProposed.consensusStartTime = System.nanoTime();
+        
+        // 如果 pendingRequests 为 null，使用空列表代替，防止后续空指针
+        if (pendingRequests == null) {
+            pendingRequests = new RequestList();
         }
-        dec.batchSize = numberOfMessages;
+
+        int numberOfMessages = pendingRequests.size();
+        int numberOfNonces = this.controller.getStaticConf().getNumberOfNonces();
+
+        // 2. 填充 Decision 元数据 (如果 dec 不为 null)
+        if (dec != null) {
+            dec.batchSize = numberOfMessages;
+            
+            if (dec.getConsensusId() > -1 && numberOfMessages > 0) {
+                dec.firstMessageProposed = pendingRequests.getFirst();
+                // 再次检查 firstMessageProposed 是否为 null
+                if (dec.firstMessageProposed != null) {
+                    dec.firstMessageProposed.consensusStartTime = System.nanoTime();
+                }
+            }
+        } else {
+            // 如果 dec 为 null，仅打印警告，但继续执行以生成合法的空 Batch
+            logger.warn("createPropose received null Decision, creating empty batch.");
+        }
 
         logger.debug("Creating a PROPOSE with " + numberOfMessages + " msgs");
 
+        // 3. [关键修复] 始终返回由 BatchBuilder 生成的合法 Batch
+        // 即使 requests 为空，makeBatch 也会生成包含正确头部信息的字节数组
         return bb.makeBatch(pendingRequests, numberOfNonces, System.currentTimeMillis(), controller.getStaticConf().getUseSignatures() == 1);
     }
 

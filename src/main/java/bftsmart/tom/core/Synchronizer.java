@@ -115,6 +115,12 @@ public class Synchronizer {
      */
     public void triggerTimeout(List<TOMMessage> requestList) {
 
+        // [METRICS] 记录 View Change 开始时间
+        if (tom.lcStartTime == 0) {
+            tom.lcStartTime = System.currentTimeMillis();
+            logger.info("[METRICS] View Change STARTED at " + tom.lcStartTime);
+        }
+
         ObjectOutputStream out = null;
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
 
@@ -434,6 +440,14 @@ public class Synchronizer {
 
         for (int t : timers) {
             if (t <= regency) requestsTimer.stopSTOP(t);
+        }
+
+        // [METRICS] 记录 View Change 结束时间并计算延迟
+        if (tom.lcStartTime > 0) {
+            long endTime = System.currentTimeMillis();
+            long duration = endTime - tom.lcStartTime;
+            logger.info("[METRICS] View Change COMPLETED. Duration: " + duration + " ms");
+            tom.lcStartTime = 0;
         }
 
     }
