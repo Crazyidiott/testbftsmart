@@ -131,6 +131,10 @@ for i in {1..3}; do
     scp -i "$KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_$i.log" "./results/server_$i.log"
 done
 
+client_host=${NODES[4]}
+echo "    Fetching logs from Client..."
+scp -i "$KEY" "$USER@$client_host:${REMOTE_PROJECT_PATH}/client.log" "./results/client.log"
+
 echo "================ ANALYSIS RESULT ================"
 grep "METRICS" ./results/*.log
 echo "================================================="
