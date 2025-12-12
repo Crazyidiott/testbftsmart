@@ -118,7 +118,10 @@ sleep 5
 
 echo ">>> [Step 5] Triggering View Change (Killing Node 0)..."
 node0_host=${NODES[0]}
-ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
+
+# ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
+ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'ThroughputLatencyServer 0'"
+
 echo "    Node 0 killed!"
 
 echo "    Waiting 20 seconds for View Change to complete..."
