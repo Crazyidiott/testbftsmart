@@ -1,31 +1,7 @@
 #!/bin/bash
 
-# ================= 配置区域 =================
-# AWS 私有 IP 列表 (前4个是Replica，第5个是Client)
-# NODES=("172.31.15.219" "172.31.4.11" "172.31.10.49" "172.31.10.254" "172.31.13.125")
-# AWS 公共 IP 列表 (前4个是Replica，第5个是Client)
-
-NODES=("3.70.200.82"  "34.241.105.178" "35.176.255.17" "51.20.85.80" "43.207.183.154")
-# SSH 密钥路径
-KEY="/home/ubuntu/.ssh/dahui.pem"
-KEY_EUC1="/home/ubuntu/.ssh/dahuieuc1.pem"
-KEY_EUW1="/home/ubuntu/.ssh/dahuieuw1.pem"
-KEY_EUW2="/home/ubuntu/.ssh/dahuieuw2.pem"
-KEY_EUN1="/home/ubuntu/.ssh/dahuieun1.pem"
-
-# 对应节点的密钥数组 (0:euc1, 1:euw1, 2:euw2, 3:eun1, 4:client)
-KEYS=("$KEY_EUC1" "$KEY_EUW1" "$KEY_EUW2" "$KEY_EUN1" "$KEY")
-
-# 本地项目路径 (你的 workspace 路径)
-LOCAL_PROJECT_PATH="/home/ubuntu/work/testbftsmart"
-
-# 远程目标目录
-REMOTE_BASE="/home/ubuntu/"
-REMOTE_PROJECT_PATH="${REMOTE_BASE}/testbftsmart"
-
-# SSH 用户名
-USER="ubuntu"
-# ===========================================
+# Load WAN Configuration
+source ./wan_config.sh
 
 echo ">>> [Step 1] Generating hosts.config locally..."
 # 自动生成 hosts.config
@@ -103,7 +79,7 @@ for i in {0..3}; do
     
     ssh -i "$current_key" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}
-        nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyServer $i 1024 > server_$i.log 2>&1 &
+        nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterServer $i > server_$i.log 2>&1 &
     "
         # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterServer $i > server_$i.log 2>&1 &
         # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyServer $i 1024 > server_$i.log 2>&1 &
@@ -111,14 +87,14 @@ for i in {0..3}; do
 done
 
 echo "    Waiting 10 seconds for cluster to stabilize..."
-sleep 10
+sleep 60
 
 echo ">>> [Step 4] Starting Client (Node 4)..."
 client_host=${NODES[4]}
 client_key=${KEYS[4]}
 ssh -i "$client_key" "$USER@$client_host" "
     cd ${REMOTE_PROJECT_PATH}
-    nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 4096 1024 true false true false > client.log 2>&1 &
+    nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
 "
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
     # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 4096 1024 true false true false > client.log 2>&1 &
@@ -126,19 +102,19 @@ ssh -i "$client_key" "$USER@$client_host" "
 
 echo "    Client started."
 
-sleep 5
+sleep 60
 
 echo ">>> [Step 5] Triggering View Change (Killing Node 0)..."
 node0_host=${NODES[0]}
 node0_key=${KEYS[0]}
 
-# ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
-ssh -i "$node0_key" "$USER@$node0_host" "pkill -f 'ThroughputLatencyServer 0'"
+# ssh -i "$node0_key" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
+# ssh -i "$node0_key" "$USER@$node0_host" "pkill -f 'ThroughputLatencyServer 0'"
 
 echo "    Node 0 killed!"
 
-echo "    Waiting 20 seconds for View Change to complete..."
-sleep 20
+echo "    Waiting 40 seconds for View Change to complete..."
+sleep 60
 
 echo ">>> [Step 6] Collecting Results..."
 mkdir -p results
