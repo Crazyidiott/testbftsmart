@@ -32,13 +32,23 @@ for i in "${!NODES[@]}"; do
             echo "    Java already installed."
         fi
         
-        # 清理旧进程和旧视图
+        # 强制清理所有 BFT-SMaRt 相关进程 (Server 和 Client)
         pkill -f bftsmart
-        rm -rf testbftsmart/config/currentView
-    '
+        # 双重保险：针对特定类名清理
+        pkill -f "CounterServer"
+        pkill -f "ThroughputLatencyServer"
+        pkill -f "CounterClient"
+        pkill -f "ThroughputLatencyClient"
+        
+        rm -rf testbftsmart
 
+    '
+    # rm -rf testbftsmart/config/currentView*
     # 2. 同步代码
     echo "    Syncing code..."
+    # 确保远程父目录存在
+    ssh -i "$current_key" "$USER@$host" "mkdir -p ${REMOTE_BASE}"
+    
     rsync -avz -e "ssh -i $current_key -o StrictHostKeyChecking=no" \
         --exclude 'build' \
         --exclude '.git' \
