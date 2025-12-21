@@ -39,8 +39,13 @@ for i in "${!NODES[@]}"; do
         pkill -f "ThroughputLatencyServer"
         pkill -f "CounterClient"
         pkill -f "ThroughputLatencyClient"
-        
-        rm -rf testbftsmart
+        ps aux | grep bftsmart | grep -v grep | awk "{print \$2}" | xargs -r kill -9
+        ps aux | grep CounterServer | grep -v grep | awk "{print \$2}" | xargs -r kill -9
+        ps aux | grep CounterClient | grep -v grep | awk "{print \$2}" | xargs -r kill -9
+        ps aux | grep ThroughputLatencyServer | grep -v grep | awk "{print \$2}" | xargs -r kill -9
+        ps aux | grep ThroughputLatencyClient | grep -v grep | awk "{print \$2}" | xargs -r kill -9
+
+        rm -rf testbftsmart/config/currentView*
 
     '
     # rm -rf testbftsmart/config/currentView*
