@@ -108,6 +108,7 @@ for i in "${!NODES[@]}"; do
     rsync -avz -e "ssh -i $current_key -o StrictHostKeyChecking=no" \
         --exclude 'build' \
         --exclude '.git' \
+        --exclude 'config/currentView' \
         "${LOCAL_PROJECT_PATH}/" "$USER@$host:${REMOTE_PROJECT_PATH}/" > /dev/null
 
     # 3. 编译代码 (使用 Gradle)
