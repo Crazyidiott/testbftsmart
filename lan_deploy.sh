@@ -77,7 +77,7 @@ for i in {0..3}; do
     
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}
-        nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyServer $i 1024 > server_$i.log 2>&1 &
+        nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterServer $i > server_$i.log 2>&1 &
     "
         # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterServer $i > server_$i.log 2>&1 &
         # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyServer $i 1024 > server_$i.log 2>&1 &
@@ -91,7 +91,7 @@ echo ">>> [Step 4] Starting Client (Node 4)..."
 client_host=${NODES[4]}
 ssh -i "$KEY" "$USER@$client_host" "
     cd ${REMOTE_PROJECT_PATH}
-    nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 true false true > client.log 2>&1 &
+    nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
 "
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
     # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 4096 1024 true false true false > client.log 2>&1 &
@@ -104,8 +104,8 @@ sleep 5
 echo ">>> [Step 5] Triggering View Change (Killing Node 0)..."
 node0_host=${NODES[0]}
 
-# ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
-ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'ThroughputLatencyServer 0'"
+ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
+# ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'ThroughputLatencyServer 0'"
 
 echo "    Node 0 killed!"
 
