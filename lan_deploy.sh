@@ -16,6 +16,19 @@ mv hosts.config.temp "${LOCAL_PROJECT_PATH}/config/hosts.config"
 echo "    hosts.config generated."
 
 echo ">>> [Step 1.5] Generating SSL Keystore..."
+
+# 检查本地是否安装了 keytool (通常包含在 openjdk-11-jdk-headless 或 openjdk-11-jre-headless 中)
+if ! type keytool > /dev/null 2>&1; then
+    echo "    keytool not found. Installing openjdk-11-jdk-headless..."
+    sudo apt-get update -qq
+    sudo apt-get install -y openjdk-11-jdk-headless -qq
+    
+    if ! type keytool > /dev/null 2>&1; then
+        echo "    Failed to install keytool. Please install Java manually."
+        exit 1
+    fi
+fi
+
 # 确保目录存在
 mkdir -p "${LOCAL_PROJECT_PATH}/config/keysSSL_TLS"
 KEYSTORE_PATH="${LOCAL_PROJECT_PATH}/config/keysSSL_TLS/EC_KeyPair_256.pkcs12"
