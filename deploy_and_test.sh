@@ -30,6 +30,44 @@ done
 mv hosts.config.temp "${LOCAL_PROJECT_PATH}/config/hosts.config"
 echo "    hosts.config generated."
 
+echo ">>> [Step 1.5] Generating SSL Keystore..."
+# 确保目录存在
+mkdir -p "${LOCAL_PROJECT_PATH}/config/keysSSL_TLS"
+KEYSTORE_PATH="${LOCAL_PROJECT_PATH}/config/keysSSL_TLS/EC_KeyPair_256.pkcs12"
+rm -f "$KEYSTORE_PATH"
+
+# 构建 SAN 字符串 (包含所有节点 IP)
+SAN_STRING=""
+for ip in "${NODES[@]}"; do
+    if [ -z "$SAN_STRING" ]; then
+        SAN_STRING="IP:$ip"
+    else
+        SAN_STRING="$SAN_STRING,IP:$ip"
+    fi
+done
+
+echo "    SAN: $SAN_STRING"
+
+# 生成 Keystore
+# 密码必须是 MySeCreT_2hMOygBwY (源码硬编码)
+keytool -genkeypair \
+  -keyalg EC \
+  -keysize 256 \
+  -alias bftsmartEC \
+  -keystore "$KEYSTORE_PATH" \
+  -storetype pkcs12 \
+  -storepass MySeCreT_2hMOygBwY \
+  -keypass MySeCreT_2hMOygBwY \
+  -dname "CN=BFT-SMaRT" \
+  -ext "SAN=$SAN_STRING" > /dev/null 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "    Keystore generated successfully."
+else
+    echo "    Keystore generation FAILED! Please check if keytool is installed."
+    exit 1
+fi
+
 echo ">>> [Step 2] Syncing and Setting up Environment..."
 
 for i in "${!NODES[@]}"; do
