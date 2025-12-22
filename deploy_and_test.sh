@@ -176,7 +176,7 @@ sleep 20
 
 echo ">>> [Step 6] Collecting Results..."
 mkdir -p results
-for i in {1..3}; do
+for i in {0..3}; do
     host=${NODES[$i]}
     echo "    Fetching logs from Node $i..."
     scp -i "$KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_$i.log" "./results/server_$i.log"

@@ -93,6 +93,7 @@ for i in "${!NODES[@]}"; do
         ps aux | grep ThroughputLatencyServer | grep -v grep | awk "{print \$2}" | xargs -r kill -9
         ps aux | grep ThroughputLatencyClient | grep -v grep | awk "{print \$2}" | xargs -r kill -9
         rm -rf testbftsmart/config/currentView
+        ls testbftsmart/config/
     '
 
     # 2. 同步代码
@@ -173,7 +174,7 @@ sleep 20
 
 echo ">>> [Step 6] Collecting Results..."
 mkdir -p results
-for i in {1..3}; do
+for i in {0..3}; do
     host=${NODES[$i]}
     echo "    Fetching logs from Node $i..."
     scp -i "$KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_$i.log" "./results/server_$i.log"

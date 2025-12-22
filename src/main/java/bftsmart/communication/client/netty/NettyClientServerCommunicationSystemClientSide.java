@@ -130,6 +130,10 @@ public class NettyClientServerCommunicationSystemClientSide extends SimpleChanne
 
 					if (!future.isSuccess()) {
 						logger.error("Impossible to connect to " + replicaId);
+                        // [FIX] 打印具体的连接失败原因
+                        if (future.cause() != null) {
+                            logger.error("Connection failure cause:", future.cause());
+                        }
 					}
 
 				} catch (java.lang.NullPointerException ex) {
@@ -167,6 +171,10 @@ public class NettyClientServerCommunicationSystemClientSide extends SimpleChanne
 
 						if (!future.isSuccess()) {
 							logger.error("Impossible to connect to " + replicaId);
+                            // [FIX] 打印具体的连接失败原因
+                            if (future.cause() != null) {
+                                logger.error("Connection failure cause:", future.cause());
+                            }
 						}
 
 					} catch (InvalidKeyException | InvalidKeySpecException ex) {

@@ -184,7 +184,7 @@ sleep 60
 
 echo ">>> [Step 6] Collecting Results..."
 mkdir -p results
-for i in {1..3}; do
+for i in {0..3}; do
     host=${NODES[$i]}
     current_key=${KEYS[$i]}
     echo "    Fetching logs from Node $i..."
