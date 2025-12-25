@@ -174,7 +174,7 @@ for i in {0..3}; do
 
 done
 
-echo "    Waiting 10 seconds for cluster to stabilize..."
+echo "    Waiting 60 seconds for cluster to stabilize..."
 sleep 60
 
 echo ">>> [Step 4] Starting Client (Node 4)..."
@@ -202,7 +202,7 @@ ssh -i "$node0_key" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
 echo "    Node 0 killed!"
 
 echo "    Waiting 40 seconds for View Change to complete..."
-sleep 60
+sleep 40
 
 echo ">>> [Step 6] Collecting Results..."
 mkdir -p results
@@ -219,6 +219,7 @@ echo "    Fetching logs from Client..."
 scp -i "$client_key" "$USER@$client_host:${REMOTE_PROJECT_PATH}/client.log" "./results/client.log"
 
 echo "================ ANALYSIS RESULT ================"
+grep "Consensus ID" ./results/*.log | head -n 5
 grep "METRICS" ./results/*.log
 echo "================================================="
 echo "Full logs are saved in ./results/"

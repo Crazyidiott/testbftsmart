@@ -18,6 +18,7 @@ echo "    Fetching logs from Client..."
 scp -i "$client_key" "$USER@$client_host:${REMOTE_PROJECT_PATH}/client.log" "./results/client.log"
 
 echo "================ ANALYSIS RESULT ================"
+grep "Consensus ID" ./results/*.log | head -n 5 
 grep "METRICS" ./results/*.log
 echo "================================================="
 echo "Full logs are saved in ./results/"
