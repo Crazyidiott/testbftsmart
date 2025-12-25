@@ -287,6 +287,17 @@ public final class DeliveryThread extends Thread {
 							d.firstMessageProposed.timestamp = requests[count][0].timestamp;
 							d.firstMessageProposed.seed = requests[count][0].seed;
 							d.firstMessageProposed.numOfNonces = requests[count][0].numOfNonces;
+							long consensusStartTime = d.firstMessageProposed.consensusStartTime;
+							long proposeReceivedTime = d.firstMessageProposed.proposeReceivedTime;
+							long writeSentTime = d.firstMessageProposed.writeSentTime;
+							long acceptSentTime = d.firstMessageProposed.acceptSentTime;
+							long decisionTime = d.firstMessageProposed.decisionTime;
+							d.firstMessageProposed = requests[count][0];
+							d.firstMessageProposed.consensusStartTime = consensusStartTime;
+							d.firstMessageProposed.proposeReceivedTime = proposeReceivedTime;
+							d.firstMessageProposed.writeSentTime = writeSentTime;
+							d.firstMessageProposed.acceptSentTime = acceptSentTime;
+							d.firstMessageProposed.decisionTime = decisionTime;
 						}
 
 						count++;
