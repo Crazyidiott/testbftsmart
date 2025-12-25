@@ -82,18 +82,39 @@ for i in "${!NODES[@]}"; do
             echo "    Java already installed."
         fi
         
-        pkill -f bftsmart
-        pkill -f "CounterServer"
-        pkill -f "ThroughputLatencyServer"
-        pkill -f "CounterClient"
-        pkill -f "ThroughputLatencyClient"
-        ps aux | grep bftsmart | grep -v grep | awk "{print \$2}" | xargs -r kill -9
-        ps aux | grep CounterServer | grep -v grep | awk "{print \$2}" | xargs -r kill -9
-        ps aux | grep CounterClient | grep -v grep | awk "{print \$2}" | xargs -r kill -9
-        ps aux | grep ThroughputLatencyServer | grep -v grep | awk "{print \$2}" | xargs -r kill -9
-        ps aux | grep ThroughputLatencyClient | grep -v grep | awk "{print \$2}" | xargs -r kill -9
-        rm -rf testbftsmart/config/currentView
-        ls testbftsmart/config/
+        echo "    [Cleanup] Killing existing processes..."
+        # Kill Java processes (Server/Client)
+        # We filter for 'java' AND 'bftsmart' to be specific.
+        # We exclude 'grep' and 'bash -c' (which might be this script itself).
+        ps -ef | grep "java" | grep "bftsmart" | grep -v "grep" | grep -v "bash -c" | awk "{print \$2}" | xargs -r kill -9
+        
+        # Kill wrapper scripts (smartrun.sh)
+        ps -ef | grep "smartrun.sh" | grep -v "grep" | grep -v "bash -c" | awk "{print \$2}" | xargs -r kill -9
+        
+        # Wait for ports to be released
+        sleep 2
+        
+        echo "    [Cleanup] Removing currentView..."
+        rm -rf testbftsmart/config/currentView*
+        
+        # --- Verification Step ---
+        echo "    [Verify] Checking for remaining processes..."
+        REMAINING_PROCS=$(ps aux | grep -E "bftsmart|CounterServer|ThroughputLatencyServer|CounterClient|ThroughputLatencyClient" | grep -v grep)
+        if [ -n "$REMAINING_PROCS" ]; then
+            echo "    WARNING: Processes still running:"
+            echo "$REMAINING_PROCS"
+        else
+            echo "    OK: No relevant processes found."
+        fi
+
+        echo "    [Verify] Checking for currentView files..."
+        if ls testbftsmart/config/currentView* 1> /dev/null 2>&1; then
+            echo "    WARNING: currentView files still exist:"
+            ls -l testbftsmart/config/currentView*
+        else
+            echo "    OK: currentView files deleted."
+        fi
+        # -------------------------
     '
 
     # 2. 同步代码
@@ -186,6 +207,7 @@ echo "    Fetching logs from Client..."
 scp -i "$KEY" "$USER@$client_host:${REMOTE_PROJECT_PATH}/client.log" "./results/client.log"
 
 echo "================ ANALYSIS RESULT ================"
+grep "Consensus ID" ./results/*.log | head -n 10 
 grep "METRICS" ./results/*.log
 echo "================================================="
 echo "Full logs are saved in ./results/"

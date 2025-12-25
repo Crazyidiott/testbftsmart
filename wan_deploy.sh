@@ -83,20 +83,41 @@ for i in "${!NODES[@]}"; do
             echo "    Java already installed."
         fi
         
-        # 强制清理所有 BFT-SMaRt 相关进程 (Server 和 Client)
-        pkill -f bftsmart
-        # 双重保险：针对特定类名清理
-        pkill -f "CounterServer"
-        pkill -f "ThroughputLatencyServer"
-        pkill -f "CounterClient"
-        pkill -f "ThroughputLatencyClient"
-        ps aux | grep bftsmart | grep -v grep | awk "{print \$2}" | xargs -r kill -9
-        ps aux | grep CounterServer | grep -v grep | awk "{print \$2}" | xargs -r kill -9
-        ps aux | grep CounterClient | grep -v grep | awk "{print \$2}" | xargs -r kill -9
-        ps aux | grep ThroughputLatencyServer | grep -v grep | awk "{print \$2}" | xargs -r kill -9
-        ps aux | grep ThroughputLatencyClient | grep -v grep | awk "{print \$2}" | xargs -r kill -9
+        echo "    [Cleanup] Killing existing processes..."
+        # Kill Java processes (Server/Client)
+        # We filter for 'java' AND 'bftsmart' to be specific.
+        # We exclude 'grep' and 'bash -c' (which might be this script itself).
+        ps -ef | grep "java" | grep "bftsmart" | grep -v "grep" | grep -v "bash -c" | awk "{print \$2}" | xargs -r kill -9
+        
+        # Kill wrapper scripts (smartrun.sh)
+        ps -ef | grep "smartrun.sh" | grep -v "grep" | grep -v "bash -c" | awk "{print \$2}" | xargs -r kill -9
 
-        rm -rf testbftsmart/config/currentView*
+        # Wait for ports to be released
+        sleep 2
+
+        echo "    [Cleanup] Removing currentView..."
+        # 强制删除 currentView 文件，确保下次启动时读取 hosts.config
+        rm -f testbftsmart/config/currentView
+        rm -f testbftsmart/config/currentView*
+
+        # --- Verification Step ---
+        echo "    [Verify] Checking for remaining processes..."
+        REMAINING_PROCS=$(ps aux | grep -E "bftsmart|CounterServer|ThroughputLatencyServer|CounterClient|ThroughputLatencyClient" | grep -v grep)
+        if [ -n "$REMAINING_PROCS" ]; then
+            echo "    WARNING: Processes still running:"
+            echo "$REMAINING_PROCS"
+        else
+            echo "    OK: No relevant processes found."
+        fi
+
+        echo "    [Verify] Checking for currentView files..."
+        if ls testbftsmart/config/currentView* 1> /dev/null 2>&1; then
+            echo "    WARNING: currentView files still exist:"
+            ls -l testbftsmart/config/currentView*
+        else
+            echo "    OK: currentView files deleted."
+        fi
+        # -------------------------
 
     '
     # rm -rf testbftsmart/config/currentView*
@@ -175,7 +196,7 @@ echo ">>> [Step 5] Triggering View Change (Killing Node 0)..."
 node0_host=${NODES[0]}
 node0_key=${KEYS[0]}
 
-# ssh -i "$node0_key" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
+ssh -i "$node0_key" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
 # ssh -i "$node0_key" "$USER@$node0_host" "pkill -f 'ThroughputLatencyServer 0'"
 
 echo "    Node 0 killed!"
