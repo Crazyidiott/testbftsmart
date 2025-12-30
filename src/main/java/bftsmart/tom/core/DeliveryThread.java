@@ -292,12 +292,19 @@ public final class DeliveryThread extends Thread {
 							long writeSentTime = d.firstMessageProposed.writeSentTime;
 							long acceptSentTime = d.firstMessageProposed.acceptSentTime;
 							long decisionTime = d.firstMessageProposed.decisionTime;
+							int proposeSize = d.firstMessageProposed.proposeSize;
+							int writeSize = d.firstMessageProposed.writeSize;
+							int acceptSize = d.firstMessageProposed.acceptSize;
+
 							d.firstMessageProposed = requests[count][0];
 							d.firstMessageProposed.consensusStartTime = consensusStartTime;
 							d.firstMessageProposed.proposeReceivedTime = proposeReceivedTime;
 							d.firstMessageProposed.writeSentTime = writeSentTime;
 							d.firstMessageProposed.acceptSentTime = acceptSentTime;
 							d.firstMessageProposed.decisionTime = decisionTime;
+							d.firstMessageProposed.proposeSize = proposeSize;
+							d.firstMessageProposed.writeSize = writeSize;
+							d.firstMessageProposed.acceptSize = acceptSize;
 						}
 
 						count++;
