@@ -91,7 +91,14 @@ public final class Acceptor {
 		 * = nWorkers > 0 ? nWorkers : Runtime.getRuntime().availableProcessors();
 		 * this.proofExecutor = Executors.newWorkStealingPool(nWorkers);
 		 */
+
+		// create a single thread executor for proof generation
 		this.proofExecutor = Executors.newSingleThreadExecutor();
+
+		// create a work-stealing thread pool for proof generation
+		// int nWorkers = this.controller.getStaticConf().getNumNettyWorkers(); 
+		// nWorkers = nWorkers > 0 ? nWorkers : Runtime.getRuntime().availableProcessors();
+		// this.proofExecutor = Executors.newWorkStealingPool(nWorkers);
 	}
 
 	public MessageFactory getFactory() {
