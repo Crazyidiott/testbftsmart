@@ -284,9 +284,9 @@ public final class DeliveryThread extends Thread {
 
 						// cons.firstMessageProposed contains the performance counters
 						if (requests[count][0].equals(d.firstMessageProposed)) {
-							d.firstMessageProposed.timestamp = requests[count][0].timestamp;
-							d.firstMessageProposed.seed = requests[count][0].seed;
-							d.firstMessageProposed.numOfNonces = requests[count][0].numOfNonces;
+							// d.firstMessageProposed.timestamp = requests[count][0].timestamp;
+							// d.firstMessageProposed.seed = requests[count][0].seed;
+							// d.firstMessageProposed.numOfNonces = requests[count][0].numOfNonces;
 							long consensusStartTime = d.firstMessageProposed.consensusStartTime;
 							long proposeReceivedTime = d.firstMessageProposed.proposeReceivedTime;
 							long writeSentTime = d.firstMessageProposed.writeSentTime;

@@ -81,6 +81,10 @@ public class TOMMessage extends SystemMessage implements Externalizable, Compara
 	public transient long deliveryTime =0; //time the request is delivered
 	public transient long executedTime =0; //time the request is executed
 
+	public transient int proposeSize = 0; // size of the propose message
+	public transient int writeSize = 0; // size of the write message
+	public transient int acceptSize = 0; // size of the accept message
+
 	//the reply associated with this message
 	public transient TOMMessage reply = null;
 	public transient boolean alreadyProposed = false;

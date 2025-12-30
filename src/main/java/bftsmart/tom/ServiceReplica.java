@@ -400,14 +400,14 @@ public class ServiceReplica {
             // 打印共识延迟统计信息
             if (requestsFromConsensus.length > 0) {
                 TOMMessage firstReq = requestsFromConsensus[0];
-                long proposeLat = firstReq.writeSentTime - firstReq.proposeReceivedTime;
+                long proposeLat = firstReq.writeSentTime - firstReq.consensusStartTime;
                 long writeLat = firstReq.acceptSentTime - firstReq.writeSentTime;
                 long acceptLat = firstReq.decisionTime - firstReq.acceptSentTime;
                 long totalConsensusLat = firstReq.decisionTime - firstReq.consensusStartTime;
 
                 System.out.println(String.format(
-                    "Consensus ID: %d | Propose: %d ns | Write: %d ns | Accept: %d ns | Total: %d ns",
-                    consId[consensusCount], proposeLat, writeLat, acceptLat, totalConsensusLat
+                    "Consensus ID: %d | Propose: %d ns (%d bytes) | Write: %d ns (%d bytes) | Accept: %d ns (%d bytes) | Total: %d ns",
+                    consId[consensusCount], proposeLat, firstReq.proposeSize, writeLat, firstReq.writeSize, acceptLat, firstReq.acceptSize, totalConsensusLat
                 ));
             }
 

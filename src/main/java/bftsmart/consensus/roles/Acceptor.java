@@ -188,7 +188,10 @@ public final class Acceptor {
 		logger.debug("PROPOSE received from:{}, for consensus cId:{}, I am:{}", msg.getSender(), cid, me);
 		if (msg.getSender() == executionManager.getCurrentLeader() // Is the replica the leader?
 				&& epoch.getTimestamp() == 0 && ts == ets && ets == 0) { // Is all this in epoch 0?
-			executePropose(epoch, msg.getValue());
+			
+			// 统计 PROPOSE 消息大小
+			int proposeSize = TOMUtil.getBytes(msg).length;
+			executePropose(epoch, msg.getValue(), proposeSize);
 		} else {
 			logger.debug("Propose received is not from the expected leader");
 		}
@@ -199,8 +202,9 @@ public final class Acceptor {
 	 *
 	 * @param epoch the current epoch of the consensus
 	 * @param value Value that is proposed
+	 * @param proposeSize Size of the propose message
 	 */
-	private void executePropose(Epoch epoch, byte[] value) {
+	private void executePropose(Epoch epoch, byte[] value, int proposeSize) {
 		int cid = epoch.getConsensus().getId();
 		logger.debug("Executing propose for cId:{}, Epoch Timestamp:{}", cid, epoch.getTimestamp());
 
@@ -231,6 +235,7 @@ public final class Acceptor {
 
 				}
 				epoch.getConsensus().getDecision().firstMessageProposed.proposeReceivedTime = System.nanoTime();
+				epoch.getConsensus().getDecision().firstMessageProposed.proposeSize = proposeSize;
 
 				if (controller.getStaticConf().isBFT()) {
 					logger.debug("Sending WRITE for " + cid);
@@ -239,8 +244,9 @@ public final class Acceptor {
 					epoch.getConsensus().getDecision().firstMessageProposed.writeSentTime = System.nanoTime();
 
 					logger.debug("Sending WRITE for cId:{}, I am:{}", cid, me);
-					communication.send(this.controller.getCurrentViewOtherAcceptors(),
-							factory.createWrite(cid, epoch.getTimestamp(), epoch.propValueHash));
+					ConsensusMessage writeMsg = factory.createWrite(cid, epoch.getTimestamp(), epoch.propValueHash);
+					epoch.getConsensus().getDecision().firstMessageProposed.writeSize = TOMUtil.getBytes(writeMsg).length;
+					communication.send(this.controller.getCurrentViewOtherAcceptors(), writeMsg);
 
 					epoch.writeSent();
 
@@ -259,8 +265,9 @@ public final class Acceptor {
 					epoch.getConsensus().setQuorumWrites(epoch.propValueHash);
 					/*****************************************/
 
-					communication.send(this.controller.getCurrentViewOtherAcceptors(),
-							factory.createAccept(cid, epoch.getTimestamp(), epoch.propValueHash));
+					ConsensusMessage acceptMsg = factory.createAccept(cid, epoch.getTimestamp(), epoch.propValueHash);
+					epoch.getConsensus().getDecision().firstMessageProposed.acceptSize = TOMUtil.getBytes(acceptMsg).length;
+					communication.send(this.controller.getCurrentViewOtherAcceptors(), acceptMsg);
 
 					epoch.acceptSent();
 					computeAccept(cid, epoch, epoch.propValueHash);
@@ -333,6 +340,9 @@ public final class Acceptor {
 							"Speculative ACCEPT message for consensus {} matches the written value, sending it to the other replicas",
 							cid);
 
+					if (epoch.getConsensus().getDecision().firstMessageProposed != null) {
+						epoch.getConsensus().getDecision().firstMessageProposed.acceptSize = TOMUtil.getBytes(cm).length;
+					}
 					communication.getServersConn().send(targets, cm, true);
 
 				} else { // ... and if not, create the ACCEPT message again (with the correct value), and
@@ -347,6 +357,9 @@ public final class Acceptor {
 								"Creating cryptographic proof for the correct ACCEPT message from consensus " + cid);
 						insertProof(correctAccept, epoch.deserializedPropValue);
 
+						if (epoch.getConsensus().getDecision().firstMessageProposed != null) {
+							epoch.getConsensus().getDecision().firstMessageProposed.acceptSize = TOMUtil.getBytes(correctAccept).length;
+						}
 						communication.getServersConn().send(targets, correctAccept, true);
 
 					});
