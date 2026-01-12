@@ -75,7 +75,7 @@ public class Synchronizer {
     private final Acceptor acceptor;
     private final MessageDigest md;
             
-    // Attributes to temporarely store synchronization info
+    // attributes to temporarely store synchronization info
     // if state transfer is required for synchronization
     private int tempRegency = -1;
     private CertifiedDecision tempLastHighestCID = null;
@@ -84,7 +84,12 @@ public class Synchronizer {
     private int tempBatchSize = -1;
     private boolean tempIAmLeader = false;
 
-    
+    // [METRICS] View Change timestamps
+    private long freezeStartTime = 0;
+    private long collectStartTime = 0;
+    private long catchUpStartTime = 0;
+    private long finaliseStartTime = 0;
+
     public Synchronizer(TOMLayer tom) {
         
         this.tom = tom;
@@ -118,7 +123,9 @@ public class Synchronizer {
         // [METRICS] 记录 View Change 开始时间
         if (tom.lcStartTime == 0) {
             tom.lcStartTime = System.currentTimeMillis();
+            this.freezeStartTime = tom.lcStartTime;
             logger.info("[METRICS] View Change STARTED at " + tom.lcStartTime);
+            logger.info("[METRICS] Step 1: FREEZE phase started");
         }
 
         ObjectOutputStream out = null;
@@ -446,8 +453,27 @@ public class Synchronizer {
         if (tom.lcStartTime > 0) {
             long endTime = System.currentTimeMillis();
             long duration = endTime - tom.lcStartTime;
-            logger.info("[METRICS] View Change COMPLETED. Duration: " + duration + " ms");
+            
+            // Finalise phase ends here
+            long finaliseDuration = (finaliseStartTime > 0) ? (endTime - finaliseStartTime) : 0;
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("[METRICS] View Change COMPLETED. Total Duration: " + duration + " ms\n");
+            sb.append("\t|-- Freeze Phase: ").append(collectStartTime - freezeStartTime).append(" ms\n");
+            sb.append("\t|-- Collect Phase: ").append((catchUpStartTime > 0 ? catchUpStartTime : finaliseStartTime) - collectStartTime).append(" ms\n");
+            if (catchUpStartTime > 0) { // Only Leader performs Catch-up
+                 sb.append("\t|-- Catch-up Phase: ").append(finaliseStartTime - catchUpStartTime).append(" ms\n");
+            }
+            sb.append("\t|-- Finalise Phase: ").append(finaliseDuration).append(" ms");
+
+            logger.info(sb.toString());
+
+            // Reset timestamps
             tom.lcStartTime = 0;
+            freezeStartTime = 0;
+            collectStartTime = 0;
+            catchUpStartTime = 0;
+            finaliseStartTime = 0;
         }
 
     }
@@ -467,6 +493,11 @@ public class Synchronizer {
         // Ask to start the synchronizations phase if enough messages have been received already
         if (condition && lcManager.getNextReg() == lcManager.getLastReg()) {
             
+            if (collectStartTime == 0) {
+                collectStartTime = System.currentTimeMillis();
+                logger.info("[METRICS] Step 2: COLLECT phase started (Sending STOP)");
+            }
+
             logger.debug("Initialize synch phase");
             requestsTimer.Enabled(false);
             requestsTimer.stopTimer();
@@ -530,6 +561,11 @@ public class Synchronizer {
         // Did the synchronization phase really started?
         //if (lcManager.getStopsSize(nextReg) > this.reconfManager.getQuorum2F() && lcManager.getNextReg() > lcManager.getLastReg()) {
         if (condition && lcManager.getNextReg() > lcManager.getLastReg()) {
+
+            if (collectStartTime == 0) { // Safety check if we skipped previous block
+                 collectStartTime = System.currentTimeMillis();
+                 logger.info("[METRICS] Step 2: COLLECT phase started (Processing STOPs)");
+            }
             
             if (!execManager.stopped()) execManager.stop(); // stop consensus execution if more than f replicas sent a STOP message
 
@@ -937,6 +973,11 @@ public class Synchronizer {
         // normalize the collects and apply to them the predicate "sound"
         if (lcManager.sound(lcManager.selectCollects(regency, currentCID))) {
 
+            if (catchUpStartTime == 0) {
+                 catchUpStartTime = System.currentTimeMillis();
+                 logger.info("[METRICS] Step 3: CATCH-UP phase started (Leader only)");
+            }
+
             logger.debug("Sound predicate is true");
 
             signedCollects = lcManager.getCollects(regency); // all original collects that the replica has received
@@ -1009,6 +1050,11 @@ public class Synchronizer {
     // information sent in the catch-up message
     private void finalise(int regency, CertifiedDecision lastHighestCID,
             HashSet<SignedObject> signedCollects, byte[] propose, int batchSize, boolean iAmLeader) {
+
+        if (finaliseStartTime == 0) {
+             finaliseStartTime = System.currentTimeMillis();
+             logger.info("[METRICS] Step 4: FINALISE phase started");
+        }
 
         int currentCID = lastHighestCID.getCID() + 1;
         logger.debug("Final stage of LC protocol");
