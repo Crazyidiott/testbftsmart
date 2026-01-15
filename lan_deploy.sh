@@ -3,6 +3,42 @@
 # Load LAN Configuration
 source ./lan_config.sh
 
+# EXPERIMENT CONFIGURATION
+# -----------------------------
+# Change this to 1000 for "Big Block" experiment
+# Change this to 10 for "Small Block" experiment
+MAX_BATCH_SIZE=1000
+# -----------------------------
+
+echo ">>> [Step 0] Configuring Batch Size to ${MAX_BATCH_SIZE}..."
+# Use sed to update system.config locally before syncing
+CONFIG_FILE="${LOCAL_PROJECT_PATH}/config/system.config"
+
+# Update maxbatchsize
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' "s/system.totalordermulticast.maxbatchsize = [0-9]*/system.totalordermulticast.maxbatchsize = ${MAX_BATCH_SIZE}/g" "$CONFIG_FILE"
+else
+    sed -i "s/system.totalordermulticast.maxbatchsize = [0-9]*/system.totalordermulticast.maxbatchsize = ${MAX_BATCH_SIZE}/g" "$CONFIG_FILE"
+fi
+
+# Update batchtimeout
+# For small batches, we want aggressive timeout (wait less). For big batches, we can wait a bit or use -1 (ondemand).
+# Here we set a general strategy: if batch size is small, timeout is small to encourage frequent blocks.
+if [ "$MAX_BATCH_SIZE" -le 20 ]; then
+     TIMEOUT_VAL=0
+else
+     TIMEOUT_VAL=-1
+fi
+
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    sed -i '' "s/system.totalordermulticast.batchtimeout = .*/system.totalordermulticast.batchtimeout = ${TIMEOUT_VAL}/g" "$CONFIG_FILE"
+else
+    sed -i "s/system.totalordermulticast.batchtimeout = .*/system.totalordermulticast.batchtimeout = ${TIMEOUT_VAL}/g" "$CONFIG_FILE"
+fi
+
+echo "    Updated system.config: maxbatchsize=${MAX_BATCH_SIZE}, batchtimeout=${TIMEOUT_VAL}"
+
+
 echo ">>> [Step 1] Generating hosts.config locally..."
 # 自动生成 hosts.config
 rm -f hosts.config.temp
@@ -159,7 +195,7 @@ for i in {0..3}; do
     
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}
-        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyServer $i 1000 1024 1024 false 0 0 > server_$i.log 2>&1 &
+        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyServer $i 1000 1024 1024 false nosig 0 > server_$i.log 2>&1 &
     "
         # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterServer $i > server_$i.log 2>&1 &
         # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyServer $i 1024 > server_$i.log 2>&1 &
@@ -173,7 +209,7 @@ echo ">>> [Step 4] Starting Client (Node 4)..."
 client_host=${NODES[4]}
 ssh -i "$KEY" "$USER@$client_host" "
     cd ${REMOTE_PROJECT_PATH}
-    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyClient 1001 1 1000 1024 10 false false nosig > client.log 2>&1 &
+    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyClient 1001 2000 10000 1024 10 false false nosig > client.log 2>&1 &
 "
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
     # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 true false true > client.log 2>&1 &
