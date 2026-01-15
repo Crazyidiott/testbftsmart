@@ -5,7 +5,7 @@ source ./lan_config.sh
 
 echo ">>> [Step 6] Collecting Results..."
 mkdir -p results
-for i in {1..3}; do
+for i in {0..3}; do
     host=${NODES[$i]}
     current_key=${KEY}
     echo "    Fetching logs from Node $i..."
