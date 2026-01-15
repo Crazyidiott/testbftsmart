@@ -159,7 +159,7 @@ for i in {0..3}; do
     
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}
-        nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterServer $i > server_$i.log 2>&1 &
+        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyServer $i 1000 1024 1024 false 0 0 > server_$i.log 2>&1 &
     "
         # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterServer $i > server_$i.log 2>&1 &
         # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyServer $i 1024 > server_$i.log 2>&1 &
@@ -173,10 +173,10 @@ echo ">>> [Step 4] Starting Client (Node 4)..."
 client_host=${NODES[4]}
 ssh -i "$KEY" "$USER@$client_host" "
     cd ${REMOTE_PROJECT_PATH}
-    nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
+    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyClient 1001 1 1000 1024 10 false false nosig > client.log 2>&1 &
 "
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
-    # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 4096 1024 true false true false > client.log 2>&1 &
+    # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 true false true > client.log 2>&1 &
 
 
 echo "    Client started."
