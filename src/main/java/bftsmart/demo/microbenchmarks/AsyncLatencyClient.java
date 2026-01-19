@@ -45,6 +45,8 @@ import java.util.concurrent.Future;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  *
@@ -54,10 +56,12 @@ import java.util.concurrent.atomic.AtomicLong;
 public class AsyncLatencyClient {
 
     static int initId;
+    // Global counter for total throughput monitoring
+    static AtomicLong globalOpsCounter = new AtomicLong(0);
     
     public static void main(String[] args) throws IOException {
         if (args.length < 8) {
-            System.out.println("Usage: ... ThroughputLatencyClient <initial client id> <number of clients> <number of operations> <request size> <max interval (ms)> <read only?> <verbose?> <nosig | default | ecdsa>");
+            System.out.println("Usage: ... ThroughputLatencyClient <initial client id> <number of clients> <number of operations> <request size> <interval (ms)> <read only?> <verbose?> <nosig | default | ecdsa> [target_rate_per_client]");
             System.exit(-1);
         }
 
@@ -69,6 +73,12 @@ public class AsyncLatencyClient {
         boolean readOnly = Boolean.parseBoolean(args[5]);
         boolean verbose = Boolean.parseBoolean(args[6]);
         String sign = args[7];
+
+        double targetRate = -1; // Default -1 means no rate limit (full speed)
+        if (args.length > 8) {
+             targetRate = Double.parseDouble(args[8]);
+             System.out.println("Rate limit enabled: " + targetRate + " ops/sec per client");
+        }
         
         int s = 0;
         if (!sign.equalsIgnoreCase("nosig")) s++;
@@ -80,6 +90,21 @@ public class AsyncLatencyClient {
             System.exit(0);
         }
         
+        // Start global rate monitoring timer
+        Timer globalRateTimer = new Timer(true);
+        globalRateTimer.scheduleAtFixedRate(new TimerTask() {
+            long lastOps = 0;
+            @Override
+            public void run() {
+                long currentOps = globalOpsCounter.get();
+                long delta = currentOps - lastOps;
+                lastOps = currentOps;
+                if (delta > 0 || currentOps > 0) {
+                    System.out.println("[Total Client Throughput] " + delta + " ops/sec");
+                }
+            }
+        }, 1000, 1000);
+
         Client[] clients = new Client[numThreads];
 
         for (int i = 0; i < numThreads; i++) {
@@ -90,7 +115,7 @@ public class AsyncLatencyClient {
             }
 
             System.out.println("Launching client " + (initId + i));
-            clients[i] = new AsyncLatencyClient.Client(initId + i, numberOfOps, requestSize, interval, readOnly, verbose, s);
+            clients[i] = new AsyncLatencyClient.Client(initId + i, numberOfOps, requestSize, interval, readOnly, verbose, s, targetRate);
         }
         
         ExecutorService exec = Executors.newFixedThreadPool(clients.length);
@@ -130,13 +155,13 @@ public class AsyncLatencyClient {
         int rampup = 3000;
         
         // Added for rate monitoring
-        private AtomicLong opsCounter = new AtomicLong(0);
-        private Timer rateTimer;
+        private final double targetRate; // Target rate in ops/sec. -1 for unlimited.
 
-        public Client(int id, int numberOfOps, int requestSize, int interval, boolean readOnly, boolean verbose, int sign) {
+        public Client(int id, int numberOfOps, int requestSize, int interval, boolean readOnly, boolean verbose, int sign, double targetRate) {
 
             this.id = id;
             this.serviceProxy = new AsynchServiceProxy(id);
+            this.targetRate = targetRate;
 
             this.numberOfOps = numberOfOps;
             this.requestSize = requestSize;
@@ -180,22 +205,7 @@ public class AsyncLatencyClient {
                 buffer.put(signature);
                 this.request = buffer.array();
 
-                // Start rate monitoring timer
-                if (id == initId) { // Only the first client prints rate to avoid console flooding
-                    this.rateTimer = new Timer(true);
-                    this.rateTimer.scheduleAtFixedRate(new TimerTask() {
-                        long lastOps = 0;
-                        @Override
-                        public void run() {
-                            long currentOps = opsCounter.get();
-                            long delta = currentOps - lastOps;
-                            lastOps = currentOps;
-                            if (delta > 0) {
-                                System.out.println("Client " + id + " Send Rate: " + delta + " ops/sec");
-                            }
-                        }
-                    }, 1000, 1000);
-                }
+                // Removed individual timer to reduce noise
                 
             } catch (NoSuchAlgorithmException | SignatureException | NoSuchProviderException | InvalidKeyException | InvalidKeySpecException ex) {
                 ex.printStackTrace();
@@ -212,8 +222,30 @@ public class AsyncLatencyClient {
                 
                 if (this.verbose) System.out.println("Executing experiment for " + this.numberOfOps + " ops");
 
+                long startExperimentTime = System.nanoTime();
+
                 for (int i = 0; i < this.numberOfOps; i++) {
                     
+                    // --- Rate Limiting Logic ---
+                    if (this.targetRate > 0) {
+                        double expectedTimeSinceStartSec = (i) / this.targetRate; // How many seconds should have passed for i ops
+                        long expectedTimeSinceStartNano = (long) (expectedTimeSinceStartSec * 1_000_000_000L);
+                        long actualTimeSinceStartNano = System.nanoTime() - startExperimentTime;
+                        
+                        long sleepNano = expectedTimeSinceStartNano - actualTimeSinceStartNano;
+                        
+                        if (sleepNano > 0) {
+                            long sleepMillis = sleepNano / 1_000_000L;
+                            int sleepNanos = (int) (sleepNano % 1_000_000L);
+                            try {
+                                Thread.sleep(sleepMillis, sleepNanos);
+                            } catch (InterruptedException e) {
+                                // Ignore
+                            }
+                        }
+                    }
+                    // ---------------------------
+
                     long last_send_instant = System.nanoTime();
                     this.serviceProxy.invokeAsynchRequest(this.request, new ReplyListener() {
 
@@ -244,12 +276,14 @@ public class AsyncLatencyClient {
                         }
                     }, this.reqType);
                     
-                    // Increment counter for rate monitoring
-                    if (id == initId) opsCounter.incrementAndGet();
+                    // Increment global counter for rate monitoring
+                    AsyncLatencyClient.globalOpsCounter.incrementAndGet();
 
                     if (i > (this.numberOfOps / 2)) st.store(System.nanoTime() - last_send_instant);
 
-                    if (this.interval > 0 || this.rampup > 0) {
+                    // Original "interval" based limiting (Poisson/Random Sleep)
+                    // If targetRate is set, we disable the original interval logic to avoid conflict
+                    if (this.targetRate <= 0 && (this.interval > 0 || this.rampup > 0)) {
                         int randomInterval = this.interval > 0 ? rand.nextInt(this.interval) : 0;
                         Thread.sleep(Math.max(randomInterval + 1, this.rampup));
                         if (this.rampup > 0) this.rampup -= 100;
