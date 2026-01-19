@@ -42,6 +42,9 @@ import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  *
@@ -125,6 +128,10 @@ public class AsyncLatencyClient {
         boolean verbose;
         Random rand;
         int rampup = 3000;
+        
+        // Added for rate monitoring
+        private AtomicLong opsCounter = new AtomicLong(0);
+        private Timer rateTimer;
 
         public Client(int id, int numberOfOps, int requestSize, int interval, boolean readOnly, boolean verbose, int sign) {
 
@@ -173,7 +180,23 @@ public class AsyncLatencyClient {
                 buffer.put(signature);
                 this.request = buffer.array();
 
-
+                // Start rate monitoring timer
+                if (id == initId) { // Only the first client prints rate to avoid console flooding
+                    this.rateTimer = new Timer(true);
+                    this.rateTimer.scheduleAtFixedRate(new TimerTask() {
+                        long lastOps = 0;
+                        @Override
+                        public void run() {
+                            long currentOps = opsCounter.get();
+                            long delta = currentOps - lastOps;
+                            lastOps = currentOps;
+                            if (delta > 0) {
+                                System.out.println("Client " + id + " Send Rate: " + delta + " ops/sec");
+                            }
+                        }
+                    }, 1000, 1000);
+                }
+                
             } catch (NoSuchAlgorithmException | SignatureException | NoSuchProviderException | InvalidKeyException | InvalidKeySpecException ex) {
                 ex.printStackTrace();
                 System.exit(0);
@@ -220,6 +243,10 @@ public class AsyncLatencyClient {
                             }
                         }
                     }, this.reqType);
+                    
+                    // Increment counter for rate monitoring
+                    if (id == initId) opsCounter.incrementAndGet();
+
                     if (i > (this.numberOfOps / 2)) st.store(System.nanoTime() - last_send_instant);
 
                     if (this.interval > 0 || this.rampup > 0) {
