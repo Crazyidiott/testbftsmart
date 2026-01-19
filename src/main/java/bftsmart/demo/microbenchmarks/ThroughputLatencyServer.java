@@ -39,6 +39,9 @@ import java.security.SignatureException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.util.Base64;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -72,6 +75,10 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
     
     private RandomAccessFile randomAccessFile = null;
     private FileChannel channel = null;
+
+    private AtomicLong timeBasedOpsCount = new AtomicLong(0);
+    private AtomicLong timeBasedTotalLatency = new AtomicLong(0);
+    private AtomicLong timeBasedLatSamples = new AtomicLong(0);
 
     public ThroughputLatencyServer(int id, int interval, int replySize, int stateSize, boolean context,  int signed, int write) {
 
@@ -119,6 +126,23 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
                 System.exit(0);
             }
         }
+
+        // Start Time-based statistics timer
+        Timer timer = new Timer(true);
+        timer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                long ops = timeBasedOpsCount.getAndSet(0);
+                long latSum = timeBasedTotalLatency.getAndSet(0);
+                long latCount = timeBasedLatSamples.getAndSet(0);
+
+                double tps = (double) ops; // Loop is 1 sec
+                double avgLat = latCount > 0 ? (double) latSum / latCount : 0;
+
+                System.out.println(String.format("[Time-Based 1s] TPS: %.2f | Avg Latency: %.2f us", tps, avgLat / 1000));
+            }
+        }, 1000, 1000);
+
         replica = new ServiceReplica(id, this, this);
     }
     
@@ -225,6 +249,7 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         boolean readOnly = false;
         
         iterations++;
+        timeBasedOpsCount.incrementAndGet();
 
         if (msgCtx != null && msgCtx.getFirstInBatch() != null) {
             
@@ -232,8 +257,11 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
             readOnly = msgCtx.readOnly;
                     
             msgCtx.getFirstInBatch().executedTime = System.nanoTime();
-                        
-            totalLatency.store(msgCtx.getFirstInBatch().executedTime - msgCtx.getFirstInBatch().receptionTime);
+            
+            long latency = msgCtx.getFirstInBatch().executedTime - msgCtx.getFirstInBatch().receptionTime;
+            totalLatency.store(latency);
+            timeBasedTotalLatency.addAndGet(latency);
+            timeBasedLatSamples.incrementAndGet();
 
             if (readOnly == false) {
 
