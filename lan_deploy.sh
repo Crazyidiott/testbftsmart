@@ -25,6 +25,12 @@ else
     # Default to unlimited/high
     CLIENT_RATE_PER_THREAD=-1
 fi
+
+if [ -n "$4" ]; then
+    SKIP_BUILD=$4
+else
+    SKIP_BUILD="false"
+fi
 # -----------------------------
 
 echo ">>> [Step 0] Configuring Batch Size to ${MAX_BATCH_SIZE}, Timeout to ${TIMEOUT_VAL}..."
@@ -171,36 +177,47 @@ for i in "${!NODES[@]}"; do
     '
 
     # 2. 同步代码
-    echo "    Syncing code..."
-    rsync -avz -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
-        --exclude 'build' \
-        --exclude '.git' \
-        --exclude 'config/currentView' \
-        "${LOCAL_PROJECT_PATH}/" "$USER@$host:${REMOTE_PROJECT_PATH}/" > /dev/null
+    if [ "$SKIP_BUILD" == "true" ]; then
+        echo "    [Fast Mode] Syncing ONLY configuration files (skipping full code sync)..."
+        # Only sync the config directory to ensure system.config updates are pushed
+        rsync -avz -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
+            "${LOCAL_PROJECT_PATH}/config/" "$USER@$host:${REMOTE_PROJECT_PATH}/config/" > /dev/null
+    else
+        echo "    Syncing code..."
+        rsync -avz -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
+            --exclude 'build' \
+            --exclude '.git' \
+            --exclude 'config/currentView' \
+            "${LOCAL_PROJECT_PATH}/" "$USER@$host:${REMOTE_PROJECT_PATH}/" > /dev/null
+    fi
 
     # 3. 编译代码 (使用 Gradle)
-    # 修改说明：
-    # 1. 赋予 gradlew 执行权限
-    # 2. 运行 installDist 生成构建产物
-    # 3. 将生成的 jar 包 (依赖+项目本身) 复制到 lib/ 目录
-    #    这样 runscripts/smartrun.sh (通常加载 lib/*.jar) 才能正常工作
-    ssh -i "$KEY" "$USER@$host" "
-        cd ${REMOTE_PROJECT_PATH}
-        chmod +x gradlew
-        echo "    Compiling with Gradle, this may take a moment..."
-        ./gradlew installDist > /dev/null 2>&1
-        
-        if [ \$? -eq 0 ]; then
-            echo "    Compilation successful."
-            # 关键步骤：把 Gradle 构建好的 jar 包复制到根目录的 lib/ 下
-            # 这样 smartrun.sh 脚本才能找到类
-            mkdir -p lib
-            cp -r build/install/library/lib/* lib/
-        else
-            echo "    Compilation FAILED!"
-            exit 1
-        fi
-    "
+    if [ "$SKIP_BUILD" == "true" ]; then
+        echo "    [Fast Mode] Skipping compilation..."
+    else
+        # Modification:
+        # 1. Grant gradlew execution permissions
+        # 2. Run installDist to generate build artifacts
+        # 3. Copy the generated jar packages (dependencies + project itself) to lib/ directory
+        #    This way runscripts/smartrun.sh (usually loads lib/*.jar) can work properly
+        ssh -i "$KEY" "$USER@$host" "
+            cd ${REMOTE_PROJECT_PATH}
+            chmod +x gradlew
+            echo "    Compiling with Gradle, this may take a moment..."
+            ./gradlew installDist > /dev/null 2>&1
+            
+            if [ \$? -eq 0 ]; then
+                echo "    Compilation successful."
+                # 关键步骤：把 Gradle 构建好的 jar 包复制到根目录的 lib/ 下
+                # 这样 smartrun.sh 脚本才能找到类
+                mkdir -p lib
+                cp -r build/install/library/lib/* lib/
+            else
+                echo "    Compilation FAILED!"
+                exit 1
+            fi
+        "
+    fi
     
     echo "    Node $i setup complete."
 done

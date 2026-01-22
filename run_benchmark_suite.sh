@@ -68,7 +68,15 @@ for ((i=0; i<$count; i++)); do
 
     # 2. Run lan_deploy.sh with arguments including RATE
     # Ensure lan_deploy.sh is executable: chmod +x lan_deploy.sh
-    ./lan_deploy.sh "$BATCH_SIZE" "$TIMEOUT" "$RATE"
+    # Arg 4: skip_build. 
+    # Logic: If it is the FIRST experiment (i=0), we MUST build. Otherwise, we can skip.
+    if [ $i -eq 0 ]; then
+        SKIP_ARG="false"
+    else
+        SKIP_ARG="true"
+    fi
+
+    ./lan_deploy.sh "$BATCH_SIZE" "$TIMEOUT" "$RATE" "$SKIP_ARG"
 
     # 3. Wait a bit for file transfer to finish (lan_deploy usually does scp at the end)
     sleep 2
