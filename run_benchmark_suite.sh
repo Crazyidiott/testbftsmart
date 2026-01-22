@@ -1,9 +1,39 @@
 #!/bin/bash
 
 # Configuration Arrays
-# Add your desired configurations here
-BATCH_SIZES=(10 100 500 1000)
-BATCH_TIMEOUTS=(-1 -1 20 50)
+# Matrix: (BatchSize, Timeout, ClientRatePerThread)
+
+# 1. Low Load (Rate=200/thread * 10 = 2000 total)
+# 2. Medium Load (Rate=1000/thread * 10 = 10000 total)
+# 3. High/Saturation Load (Rate=2000/thread * 10 = 20000 total)
+
+# Defining groups of experiments
+# Group 1: Small Batch, Small Timeout (Baseline)
+# Group 2: Small Batch, Large Timeout (Bad config)
+# Group 3: Big Batch, Large Timeout (Classic Batching)
+# Group 4: Big Batch, Small Timeout (Target Config)
+
+BATCH_SIZES=(
+    10 10 10
+    10 10 10
+    1000 1000 1000
+    1000 1000 1000
+)
+
+# Replace -1 with explicit small values (e.g. 5ms) for "Small Timeout"
+BATCH_TIMEOUTS=(
+    5 5 5       # Group 1 (Small TO)
+    50 50 50    # Group 2 (Large TO)
+    50 50 50    # Group 3 (Large TO)
+    5 5 5       # Group 4 (Small TO)
+)
+
+CLIENT_RATES=(
+    200 1000 2000  # Low, Med, High for Grp 1
+    200 1000 2000  # Low, Med, High for Grp 2
+    200 1000 2000  # Low, Med, High for Grp 3
+    200 1000 2000  # Low, Med, High for Grp 4
+)
 
 # Directory for aggregated results
 RESULTS_DIR="benchmark_results_$(date +%Y%m%d_%H%M%S)"
@@ -16,7 +46,7 @@ echo "=========================================================="
 
 # Header for summary output
 SUMMARY_FILE="$RESULTS_DIR/summary.csv"
-echo "BatchSize,Timeout,Client_Avg_Throughput(ops/s),Server_Avg_Throughput(ops/s),Server_Avg_Total_Latency(us)" > "$SUMMARY_FILE"
+echo "BatchSize,Timeout,ClientRate,Client_Avg_Throughput(ops/s),Server_Avg_Throughput(ops/s),Server_Avg_Total_Latency(us)" > "$SUMMARY_FILE"
 
 # Iterate through configurations
 # Note: ${#BATCH_SIZES[@]} gets the length of the array
@@ -25,19 +55,20 @@ count=${#BATCH_SIZES[@]}
 for ((i=0; i<$count; i++)); do
     BATCH_SIZE=${BATCH_SIZES[$i]}
     TIMEOUT=${BATCH_TIMEOUTS[$i]}
-    CONFIG_NAME="BS${BATCH_SIZE}_TO${TIMEOUT}"
+    RATE=${CLIENT_RATES[$i]}
+    CONFIG_NAME="BS${BATCH_SIZE}_TO${TIMEOUT}_RATE${RATE}"
     
     echo ""
     echo "----------------------------------------------------------"
-    echo "Running Experiment $((i+1))/$count: BatchSize=$BATCH_SIZE, Timeout=$TIMEOUT"
+    echo "Running Experiment $((i+1))/$count: BatchSize=$BATCH_SIZE, Timeout=$TIMEOUT, Rate=${RATE}/th"
     echo "----------------------------------------------------------"
 
     # 1. Clean up previous results from lan_deploy logic (optional but good practice)
     rm -rf results/
 
-    # 2. Run lan_deploy.sh with arguments
+    # 2. Run lan_deploy.sh with arguments including RATE
     # Ensure lan_deploy.sh is executable: chmod +x lan_deploy.sh
-    ./lan_deploy.sh "$BATCH_SIZE" "$TIMEOUT"
+    ./lan_deploy.sh "$BATCH_SIZE" "$TIMEOUT" "$RATE"
 
     # 3. Wait a bit for file transfer to finish (lan_deploy usually does scp at the end)
     sleep 2
@@ -114,7 +145,7 @@ for ((i=0; i<$count; i++)); do
     echo "Average Throughput: $CLIENT_OPS_AVG ops/sec" >> "$DEST_CLIENT_LOG"
     
     # Also append to the summary CSV
-    echo "$BATCH_SIZE,$TIMEOUT,$CLIENT_OPS_AVG,$SERVER_OPS_AVG,$SERVER_LAT_AVG" >> "$SUMMARY_FILE"
+    echo "$BATCH_SIZE,$TIMEOUT,$RATE,$CLIENT_OPS_AVG,$SERVER_OPS_AVG,$SERVER_LAT_AVG" >> "$SUMMARY_FILE"
 
     echo "Finished Config $CONFIG_NAME"
     echo "Waiting 10s cooldown..."

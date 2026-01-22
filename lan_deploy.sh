@@ -5,7 +5,7 @@ source ./lan_config.sh
 
 # EXPERIMENT CONFIGURATION
 # -----------------------------
-# Allow passing arguments. Default to 1000 and 50 if not provided.
+# Allow passing arguments.
 if [ -n "$1" ]; then
     MAX_BATCH_SIZE=$1
 else
@@ -15,12 +15,15 @@ fi
 if [ -n "$2" ]; then
     TIMEOUT_VAL=$2
 else
-    # Default strategy logic
-    if [ "$MAX_BATCH_SIZE" -le 20 ]; then
-         TIMEOUT_VAL=-1
-    else
-         TIMEOUT_VAL=50
-    fi
+    # Default behavior if not provided
+    TIMEOUT_VAL=50
+fi
+
+if [ -n "$3" ]; then
+    CLIENT_RATE_PER_THREAD=$3
+else
+    # Default to unlimited/high
+    CLIENT_RATE_PER_THREAD=-1
 fi
 # -----------------------------
 
@@ -221,9 +224,10 @@ sleep 10
 
 echo ">>> [Step 4] Starting Client (Node 4)..."
 client_host=${NODES[4]}
+# The last argument is CLIENT_RATE_PER_THREAD
 ssh -i "$KEY" "$USER@$client_host" "
     cd ${REMOTE_PROJECT_PATH}
-    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 100000 1024 10 false false nosig 2000 > client.log 2>&1 &
+    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 100000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
 "
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
     # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 true false true > client.log 2>&1 &
@@ -231,7 +235,30 @@ ssh -i "$KEY" "$USER@$client_host" "
 
 echo "    Client started."
 
-sleep 5
+# Replace fixed sleep with dynamic wait
+echo "    Waiting for Client to finish..."
+MAX_RETRIES=40 # 40 * 3s = ~120s max
+COUNT=0
+client_host=${NODES[4]}
+
+while [ $COUNT -lt $MAX_RETRIES ]; do
+    sleep 3
+    # Check if AsyncLatencyClient is running
+    # We use quiet grep; if returns 0, process exists.
+    if ssh -i "$KEY" "$USER@$client_host" "pgrep -f AsyncLatencyClient" > /dev/null; then
+        echo -n "."
+        ((COUNT++))
+    else
+        echo ""
+        echo "    Client process finished."
+        break
+    fi
+done
+
+if [ $COUNT -ge $MAX_RETRIES ]; then
+    echo "    WARNING: Client timed out (running longer than 120s). Force killing..."
+    ssh -i "$KEY" "$USER@$client_host" "pkill -f AsyncLatencyClient"
+fi
 
 # COMMENTED OUT STEP 5 FOR STABLE BENCHMARKING
 # echo ">>> [Step 5] Triggering View Change (Killing Node 0)..."
