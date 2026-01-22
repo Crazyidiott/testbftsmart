@@ -5,12 +5,26 @@ source ./lan_config.sh
 
 # EXPERIMENT CONFIGURATION
 # -----------------------------
-# Change this to 1000 for "Big Block" experiment
-# Change this to 10 for "Small Block" experiment
-MAX_BATCH_SIZE=1000
+# Allow passing arguments. Default to 1000 and 50 if not provided.
+if [ -n "$1" ]; then
+    MAX_BATCH_SIZE=$1
+else
+    MAX_BATCH_SIZE=1000
+fi
+
+if [ -n "$2" ]; then
+    TIMEOUT_VAL=$2
+else
+    # Default strategy logic
+    if [ "$MAX_BATCH_SIZE" -le 20 ]; then
+         TIMEOUT_VAL=-1
+    else
+         TIMEOUT_VAL=50
+    fi
+fi
 # -----------------------------
 
-echo ">>> [Step 0] Configuring Batch Size to ${MAX_BATCH_SIZE}..."
+echo ">>> [Step 0] Configuring Batch Size to ${MAX_BATCH_SIZE}, Timeout to ${TIMEOUT_VAL}..."
 # Use sed to update system.config locally before syncing
 CONFIG_FILE="${LOCAL_PROJECT_PATH}/config/system.config"
 
@@ -25,9 +39,9 @@ fi
 # For small batches, we want aggressive timeout (wait less). For big batches, we can wait a bit or use -1 (ondemand).
 # Here we set a general strategy: if batch size is small, timeout is small to encourage frequent blocks.
 if [ "$MAX_BATCH_SIZE" -le 20 ]; then
-     TIMEOUT_VAL=0
-else
      TIMEOUT_VAL=-1
+else
+     TIMEOUT_VAL=50
 fi
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -209,7 +223,7 @@ echo ">>> [Step 4] Starting Client (Node 4)..."
 client_host=${NODES[4]}
 ssh -i "$KEY" "$USER@$client_host" "
     cd ${REMOTE_PROJECT_PATH}
-    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 100000 1024 10 false false nosig > client.log 2>&1 &
+    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 100000 1024 10 false false nosig 2000 > client.log 2>&1 &
 "
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
     # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 true false true > client.log 2>&1 &
@@ -219,16 +233,17 @@ echo "    Client started."
 
 sleep 5
 
-echo ">>> [Step 5] Triggering View Change (Killing Node 0)..."
-node0_host=${NODES[0]}
+# COMMENTED OUT STEP 5 FOR STABLE BENCHMARKING
+# echo ">>> [Step 5] Triggering View Change (Killing Node 0)..."
+# node0_host=${NODES[0]}
 
-ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
+# ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
 # ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'ThroughputLatencyServer 0'"
 
-echo "    Node 0 killed!"
+# echo "    Node 0 killed!"
 
-echo "    Waiting 20 seconds for View Change to complete..."
-sleep 20
+# echo "    Waiting 60 seconds for View Change to complete..."
+# sleep 60
 
 echo ">>> [Step 6] Collecting Results..."
 mkdir -p results
