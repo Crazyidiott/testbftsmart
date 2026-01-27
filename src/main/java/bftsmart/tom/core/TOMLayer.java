@@ -16,6 +16,24 @@
  */
 package bftsmart.tom.core;
 
+import java.io.Serializable;
+import java.security.MessageDigest;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.SignedObject;
+import java.util.HashMap;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import bftsmart.clientsmanagement.ClientsManager;
 import bftsmart.clientsmanagement.RequestList;
 import bftsmart.communication.ServerCommunicationSystem;
@@ -33,24 +51,9 @@ import bftsmart.tom.core.messages.TOMMessageType;
 import bftsmart.tom.leaderchange.RequestsTimer;
 import bftsmart.tom.server.Recoverable;
 import bftsmart.tom.server.RequestVerifier;
-import bftsmart.tom.server.defaultservices.DefaultRecoverable;
-import bftsmart.tom.server.defaultservices.DefaultSingleRecoverable;
 import bftsmart.tom.util.BatchBuilder;
 import bftsmart.tom.util.BatchReader;
 import bftsmart.tom.util.TOMUtil;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.Serializable;
-import java.security.*;
-import java.util.HashMap;
-import java.util.Timer;
-import java.util.TimerTask;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.locks.Condition;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * This class implements the state machine replication protocol described in
@@ -65,6 +68,9 @@ public final class TOMLayer extends Thread implements RequestReceiver {
     public long lcStartTime = 0; 
 
     private boolean doWork = true;
+    private CountDownLatch latch = new CountDownLatch(1);
+    private Timer batchTimer = null;
+    
     //other components used by the TOMLayer (they are never changed)
     public ExecutionManager execManager; // Execution manager
     public Acceptor acceptor; // Acceptor role of the PaW algorithm
@@ -192,23 +198,48 @@ public final class TOMLayer extends Thread implements RequestReceiver {
         this.syncher = new Synchronizer(this); // create synchronizer
 
         if (controller.getStaticConf().getBatchTimeout() > -1) {
-
-            //timeout for batch
-            Timer batchTimer = new Timer();
-            batchTimer.scheduleAtFixedRate(new TimerTask() {
-                @Override
-                public void run() {
-
-                    if (clientsManager.havePendingRequests() &&
-                            (System.currentTimeMillis() - lastRequest) >= controller.getStaticConf().getBatchTimeout()) {
-
-                        logger.debug("Signaling proposer thread!!");
-                        haveMessages();
-                    }
-                }
-
-            }, 0, controller.getStaticConf().getBatchTimeout());
+            startBatchTimer();
         }
+    }
+
+    public void forwardRequestToLeader(TOMMessage request) {
+        int leaderId = execManager.getCurrentLeader();
+        if (this.controller.isCurrentViewMember(leaderId)) {
+            logger.debug("Forwarding " + request + " to " + leaderId);
+            communication.send(new int[]{leaderId},
+                    new ForwardedMessage(this.controller.getStaticConf().getProcessId(), request));
+        }
+    }
+
+    public boolean isBatchTimerEnabled() {
+        return batchTimer != null;
+    }
+
+    public void onConfigurationChanged() {
+        if (controller.getStaticConf().getBatchTimeout() > -1) {
+            startBatchTimer();
+        } else if (batchTimer != null) {
+            batchTimer.cancel();
+            batchTimer = null;
+        }
+    }
+
+    private void startBatchTimer() {
+        if (batchTimer != null) {
+            batchTimer.cancel();
+        }
+        batchTimer = new Timer();
+        batchTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                if (clientsManager.havePendingRequests() &&
+                        (System.currentTimeMillis() - lastRequest) >= controller.getStaticConf().getBatchTimeout()) {
+
+                    logger.debug("Signaling proposer thread!!");
+                    haveMessages();
+                }
+            }
+        }, 0, controller.getStaticConf().getBatchTimeout());
     }
 
     /**
@@ -611,15 +642,6 @@ public final class TOMLayer extends Thread implements RequestReceiver {
             if (Thread.holdsLock(clientsManager.getClientsLock())) clientsManager.getClientsLock().unlock();
 
             return null;
-        }
-    }
-
-    public void forwardRequestToLeader(TOMMessage request) {
-        int leaderId = execManager.getCurrentLeader();
-        if (this.controller.isCurrentViewMember(leaderId)) {
-            logger.debug("Forwarding " + request + " to " + leaderId);
-            communication.send(new int[]{leaderId},
-                    new ForwardedMessage(this.controller.getStaticConf().getProcessId(), request));
         }
     }
 

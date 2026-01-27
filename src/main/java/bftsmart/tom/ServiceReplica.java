@@ -16,19 +16,23 @@
  */
 package bftsmart.tom;
 
+import java.security.Provider;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import bftsmart.communication.ServerCommunicationSystem;
-import bftsmart.tom.core.ExecutionManager;
 import bftsmart.consensus.messages.MessageFactory;
 import bftsmart.consensus.roles.Acceptor;
 import bftsmart.consensus.roles.Proposer;
 import bftsmart.reconfiguration.ReconfigureReply;
 import bftsmart.reconfiguration.ServerViewController;
 import bftsmart.reconfiguration.VMMessage;
+import bftsmart.tom.core.ExecutionManager;
 import bftsmart.tom.core.ReplyManager;
 import bftsmart.tom.core.TOMLayer;
 import bftsmart.tom.core.messages.TOMMessage;
@@ -40,15 +44,10 @@ import bftsmart.tom.server.Recoverable;
 import bftsmart.tom.server.Replier;
 import bftsmart.tom.server.RequestVerifier;
 import bftsmart.tom.server.SingleExecutable;
-
 import bftsmart.tom.server.defaultservices.DefaultReplier;
 import bftsmart.tom.util.KeyLoader;
 import bftsmart.tom.util.ShutdownHookThread;
 import bftsmart.tom.util.TOMUtil;
-import java.security.Provider;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * This class receives messages from DeliveryThread and manages the execution
@@ -182,6 +181,27 @@ public class ServiceReplica {
             waitTTPJoinMsgLock.lock();
             canProceed.signalAll();
             waitTTPJoinMsgLock.unlock();
+        }
+    }
+
+    /**
+     * Dynamic adjustment of consensus parameters.
+     * 
+     * @param maxBatchSize New maximum batch size.
+     * @param batchTimeout New batch timeout in milliseconds.
+     */
+    public void setDynamicConsensusConfig(int maxBatchSize, int batchTimeout) {
+        if (this.SVController == null) return;
+        
+        logger.info("Updating consensus configuration: maxBatchSize={}, batchTimeout={}", maxBatchSize, batchTimeout);
+        
+        // 1. Update Configuration
+        this.SVController.getStaticConf().setMaxBatchSize(maxBatchSize);
+        this.SVController.getStaticConf().setBatchTimeout(batchTimeout);
+        
+        // 2. Notify TOMLayer to restart timer if necessary
+        if (this.tomLayer != null) {
+            this.tomLayer.onConfigurationChanged();
         }
     }
 

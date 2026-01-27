@@ -15,13 +15,13 @@ limitations under the License.
 */
 package bftsmart.reconfiguration.util;
 
-import bftsmart.tom.util.KeyLoader;
 import java.util.StringTokenizer;
-
 import java.util.regex.Pattern;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import bftsmart.tom.util.KeyLoader;
 
 public class TOMConfiguration extends Configuration {
     
@@ -30,13 +30,13 @@ public class TOMConfiguration extends Configuration {
     protected int n;
     protected int f;
     protected int requestTimeout;
-    protected int batchTimeout;
+    private volatile int batchTimeout;
     protected int tomPeriod;
     protected int paxosHighMark;
     protected int revivalHighMark;
     protected int timeoutHighMark;
     protected int replyVerificationTime;
-    protected int maxBatchSize;
+    private volatile int maxBatchSize;
     protected int maxBatchSizeInBytes;
     protected int numberOfNonces;
     protected int inQueueSize;
@@ -467,6 +467,10 @@ public class TOMConfiguration extends Configuration {
     public int getBatchTimeout() {
         return batchTimeout;
     }
+
+    public void setBatchTimeout(int batchTimeout) {
+        this.batchTimeout = batchTimeout;
+    }
     
     public int getReplyVerificationTime() {
         return replyVerificationTime;
@@ -494,6 +498,10 @@ public class TOMConfiguration extends Configuration {
     
     public int getMaxBatchSize() {
         return maxBatchSize;
+    }
+
+    public void setMaxBatchSize(int maxBatchSize) {
+        this.maxBatchSize = maxBatchSize;
     }
 
     /**
