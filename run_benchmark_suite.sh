@@ -20,6 +20,11 @@ BATCH_SIZES=(
     1000 1000 1000
 )
 
+# Metric Collection Mode
+# Options: "SAMPLE" (Interval based, e.g. every 1000 ops) or "TIME" (Time based, every 1s)
+# DEFAULT: "TIME"
+METRIC_MODE="TIME"
+
 # Replace -1 with explicit small values (e.g. 5ms) for "Small Timeout"
 BATCH_TIMEOUTS=(
     5 5 5       # Group 1 (Small TO)
@@ -111,20 +116,36 @@ for ((i=0; i<$count; i++)); do
         DEST_SERVER_LOG="$RESULTS_DIR/server_${s}_${CONFIG_NAME}.log"
         
         if [ -f "$SERVER_LOG" ]; then
-            # Extract Measurements block
-            # Assuming output format:
-            # Throughput = 1677.8523 operations/sec ...
-            # Total latency = 2916.128009 (+/- 394) us
             
-            # We grep the context of measurements to a file
-            grep -A 10 "Measurements after" "$SERVER_LOG" > "$DEST_SERVER_LOG"
-            
-            # Extract AVG Throughput from this server (Taking the last measurement or average of all measurements)
-            # Strategy: Average of all 'Throughput =' lines found in the file
-            THIS_SERVER_TP=$(grep "Throughput =" "$SERVER_LOG" | awk '{print $3}' | awk '{ sum += $1; n++ } END { if (n > 0) print sum / n; else print 0; }')
-            
-            # Extract AVG Total Latency
-            THIS_SERVER_LAT=$(grep "Total latency =" "$SERVER_LOG" | awk '{print $4}' | awk '{ sum += $1; n++ } END { if (n > 0) print sum / n; else print 0; }')
+            if [ "$METRIC_MODE" == "TIME" ]; then
+                # --- TIME BASED PARSING ---
+                # Format: [Time-Based 1s] TPS: 1534.20 | Avg Latency: 2310.50 us
+                # Extract TPS ($4) and Latency ($8)
+                
+                # Logic Update:
+                # 1. TPS: Filter out STARTUP zeros, but include zeros that happen AFTER the first positive value (Stalls).
+                # 2. Latency: Strict > 0 check (0 latency is invalid/no-sample).
+                
+                grep "\[Time-Based 1s\]" "$SERVER_LOG" > "$DEST_SERVER_LOG"
+                
+                # awk logic for TPS:
+                # - Use a flag 'started' set to 1 when we see the first val > 0.
+                # - Only count values if 'started' is true.
+                THIS_SERVER_TP=$(grep "\[Time-Based 1s\]" "$SERVER_LOG" | awk '{print $4}' | awk '{ val=$1; if(val>0) started=1; if(started) { sum += val; n++ } } END { if (n > 0) print sum / n; else print 0; }')
+                
+                THIS_SERVER_LAT=$(grep "\[Time-Based 1s\]" "$SERVER_LOG" | awk '{print $8}' | awk '$1 > 0 { sum += $1; n++ } END { if (n > 0) print sum / n; else print 0; }')
+
+            else
+                # --- SAMPLE BASED PARSING (LEGACY) ---
+                # Format: Throughput = 1677.85 operations/sec ...
+                # Format: Total latency = 2916.12 ...
+                
+                # We grep the context of measurements to a file
+                grep -A 10 "Measurements after" "$SERVER_LOG" > "$DEST_SERVER_LOG"
+                
+                THIS_SERVER_TP=$(grep "Throughput =" "$SERVER_LOG" | awk '{print $3}' | awk '{ sum += $1; n++ } END { if (n > 0) print sum / n; else print 0; }')
+                THIS_SERVER_LAT=$(grep "Total latency =" "$SERVER_LOG" | awk '{print $4}' | awk '{ sum += $1; n++ } END { if (n > 0) print sum / n; else print 0; }')
+            fi
 
             SERVER_OPS_SUM=$(echo "$SERVER_OPS_SUM + $THIS_SERVER_TP" | bc)
             SERVER_LAT_SUM=$(echo "$SERVER_LAT_SUM + $THIS_SERVER_LAT" | bc)
