@@ -25,6 +25,10 @@ BATCH_SIZES=(
 # DEFAULT: "TIME"
 METRIC_MODE="TIME"
 
+# Deploy script to use: ./lan_deploy.sh or ./wan_deploy.sh
+# Change this to switch environments
+DEPLOY_SCRIPT="./lan_deploy.sh"
+
 # Replace -1 with explicit small values (e.g. 5ms) for "Small Timeout"
 BATCH_TIMEOUTS=(
     5 5 5       # Group 1 (Small TO)
@@ -81,7 +85,7 @@ for ((i=0; i<$count; i++)); do
         SKIP_ARG="true"
     fi
 
-    ./lan_deploy.sh "$BATCH_SIZE" "$TIMEOUT" "$RATE" "$SKIP_ARG"
+    $DEPLOY_SCRIPT "$BATCH_SIZE" "$TIMEOUT" "$RATE" "$SKIP_ARG"
 
     # 3. Wait a bit for file transfer to finish (lan_deploy usually does scp at the end)
     sleep 2
