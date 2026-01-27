@@ -15,12 +15,6 @@ limitations under the License.
 */
 package bftsmart.demo.microbenchmarks;
 
-import bftsmart.tom.MessageContext;
-import bftsmart.tom.ServiceReplica;
-import bftsmart.tom.server.defaultservices.CommandsInfo;
-import bftsmart.tom.server.defaultservices.DefaultRecoverable;
-import bftsmart.tom.util.Storage;
-import bftsmart.tom.util.TOMUtil;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -39,11 +33,17 @@ import java.security.SignatureException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.util.Base64;
-import java.util.Timer;
-import java.util.TimerTask;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import bftsmart.demo.rlWrapper.RLAgentConnector;
+import bftsmart.tom.MessageContext;
+import bftsmart.tom.ServiceReplica;
+import bftsmart.tom.server.defaultservices.CommandsInfo;
+import bftsmart.tom.server.defaultservices.DefaultRecoverable;
+import bftsmart.tom.util.Storage;
+import bftsmart.tom.util.TOMUtil;
 
 /**
  * Simple server that just acknowledge the reception of a request.
@@ -79,6 +79,40 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
     private AtomicLong timeBasedOpsCount = new AtomicLong(0);
     private AtomicLong timeBasedTotalLatency = new AtomicLong(0);
     private AtomicLong timeBasedLatSamples = new AtomicLong(0);
+
+    // RL Connector
+    private RLAgentConnector rlConnector;
+    private Thread rlThread;
+
+    public class MetricsSnapshot {
+        public long ops;
+        public long latencySum;
+        public long latencySamples;
+        public long timeWindow; // in ms
+
+        public MetricsSnapshot(long ops, long latencySum, long latencySamples, long timeWindow) {
+            this.ops = ops;
+            this.latencySum = latencySum;
+            this.latencySamples = latencySamples;
+            this.timeWindow = timeWindow;
+        }
+    }
+
+    private long lastMetricsResetTime = System.currentTimeMillis();
+
+    public synchronized MetricsSnapshot getAndResetMetrics() {
+        long now = System.currentTimeMillis();
+        long window = now - lastMetricsResetTime;
+        if (window <= 0) window = 1;
+
+        long ops = timeBasedOpsCount.getAndSet(0);
+        long latSum = timeBasedTotalLatency.getAndSet(0);
+        long latSamp = timeBasedLatSamples.getAndSet(0);
+
+        lastMetricsResetTime = now;
+
+        return new MetricsSnapshot(ops, latSum, latSamp, window);
+    }
 
     public ThroughputLatencyServer(int id, int interval, int replySize, int stateSize, boolean context,  int signed, int write) {
 
@@ -128,6 +162,8 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         }
 
         // Start Time-based statistics timer
+        // Commented out to avoid conflict with RLAgentConnector
+        /*
         Timer timer = new Timer(true);
         timer.scheduleAtFixedRate(new TimerTask() {
             @Override
@@ -142,8 +178,20 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
                 System.out.println(String.format("[Time-Based 1s] TPS: %.2f | Avg Latency: %.2f us", tps, avgLat / 1000));
             }
         }, 1000, 1000);
+        */
 
         replica = new ServiceReplica(id, this, this);
+
+        // Initialize and start RL Agent Connector
+        rlConnector = new RLAgentConnector(replica, this);
+        if (rlConnector.connectToAgent("localhost", 50051)) {
+           rlThread = new Thread(rlConnector::startMonitoringLoop);
+           rlThread.setName("RL-Agent-Connector");
+           rlThread.setDaemon(true);
+           rlThread.start(); 
+        } else {
+            System.out.println("--- Failed to connect to RL Agent. Running in static mode. ---");
+        }
     }
     
     @Override
