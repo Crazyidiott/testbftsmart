@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+service MetricsService {
+    rpc SendMetrics (MetricsRequest) returns (MetricsResponse);
+    rpc Connect (Timestamp) returns (Timestamp);
+}
+
+message MetricsRequest {
+    int32 throughput = 1;
+    int32 latency = 2;
+    int32 size = 3;
+    int32 tot_thr = 4;
+    int32 tot_lat = 5;
+    int32 tot_size = 6;
+    int32 option = 7;
+    double arrival_rate = 8;
+}
+
+message MetricsResponse {
+    int32 BatchSize = 1;
+    int32 BatchTimeout = 2;
+}
+
+message Timestamp {
+    int64 timestamp = 1;
+}
