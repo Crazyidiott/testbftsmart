@@ -272,9 +272,11 @@ for i in {0..3}; do
     # Start the Python Agent FIRST
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}/server_agent
+        # Force activation of virtual environment
         source py-resdb/bin/activate
+        # Use the python executable from the virtual environment explicitly
         # Run in background with selected algorithm
-        nohup env OPT_ALGORITHM=${ALG_NAME} python3 trainer.py > agent_$i.log 2>&1 &
+        nohup env OPT_ALGORITHM=${ALG_NAME} ./py-resdb/bin/python3 trainer.py > agent_$i.log 2>&1 &
         echo '    Python Agent started with algorithm: ${ALG_NAME}'
     "
 
