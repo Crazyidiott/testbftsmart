@@ -241,26 +241,27 @@ for i in {0..3}; do
     
     ssh -i "$KEY" "$USER@$host" "
         # Check if python3-venv is installed
-        if ! dpkg -s python3-venv >/dev/null 2>&1; then
-             echo '    Installing python3-venv...'
-             sudo apt-get update -qq
-             sudo apt-get install -y python3-venv -qq
-        fi
+        # The dpkg check might fail if not root or due to other issues, but apt-get install ensures it.
+        # Adding sudo apt update to ensure package lists are fresh
+        sudo apt-get update -qq >/dev/null 2>&1
+        sudo apt-get install -y python3-venv python3-pip -qq >/dev/null 2>&1
 
         cd ${REMOTE_PROJECT_PATH}/server_agent
         
         # Kill any existing trainer.py
         pkill -f trainer.py || true
 
-        # Create virtualenv if not exists
-        if [ ! -d 'rlenv' ]; then
+        # Force recreate virtualenv if it seems broken or doesn't exist
+        if [ ! -f 'rlenv/bin/python3' ]; then
+            echo '    Creating virtual environment (rlenv)...'
+            rm -rf rlenv
             python3 -m venv rlenv
         fi
         
         # Install dependencies
-        source rlenv/bin/activate
-        pip install -q --upgrade pip
-        pip install -q -r requirements.txt
+        # Use the venv pip directly to avoid activation issues
+        ./rlenv/bin/pip install -q --upgrade pip
+        ./rlenv/bin/pip install -q -r requirements.txt
     "
 done
 
