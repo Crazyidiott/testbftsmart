@@ -233,38 +233,6 @@ for i in "${!NODES[@]}"; do
     echo "    Node $i setup complete."
 done
 
-echo ">>> [Step 2.5] Setting up Python Agent Environment (Nodes 0-3)..."
-# Loop only through replicas (0-3), ignoring client (4) for agent setup
-for i in {0..3}; do
-    host=${NODES[$i]}
-    echo "    Setting up Python Agent on Replica $i ($host)..."
-    
-    ssh -i "$KEY" "$USER@$host" "
-        # Check if python3-venv is installed
-        # The dpkg check might fail if not root or due to other issues, but apt-get install ensures it.
-        # Adding sudo apt update to ensure package lists are fresh
-        sudo apt-get update -qq >/dev/null 2>&1
-        sudo apt-get install -y python3-venv python3-pip -qq >/dev/null 2>&1
-
-        cd ${REMOTE_PROJECT_PATH}/server_agent
-        
-        # Kill any existing trainer.py
-        pkill -f trainer.py || true
-
-        # Force recreate virtualenv if it seems broken or doesn't exist
-        if [ ! -f 'rlenv/bin/python3' ]; then
-            echo '    Creating virtual environment (rlenv)...'
-            rm -rf rlenv
-            python3 -m venv rlenv
-        fi
-        
-        # Install dependencies
-        # Use the venv pip directly to avoid activation issues
-        ./rlenv/bin/pip install -q --upgrade pip
-        ./rlenv/bin/pip install -q -r requirements.txt
-    "
-done
-
 echo ">>> [Step 3] Starting Replicas (Nodes 0-3)..."
 for i in {0..3}; do
     host=${NODES[$i]}
