@@ -1,14 +1,13 @@
 package bftsmart.demo.rlWrapper;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import bftsmart.demo.microbenchmarks.ThroughputLatencyServer;
 import bftsmart.tom.ServiceReplica;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.util.concurrent.TimeUnit;
 
 public class RLAgentConnector {
 
@@ -107,16 +106,18 @@ public class RLAgentConnector {
                 
                 // Calculate throughput (ops/sec) and Avg Latency (ns)
                 double throughput = (double) snapshot.ops * 1000.0 / snapshot.timeWindow;
-                double avgLatency = snapshot.latencySamples > 0 ? (double) snapshot.latencySum / snapshot.latencySamples : 0;
+                double avgLatencyNs = snapshot.latencySamples > 0 ? (double) snapshot.latencySum / snapshot.latencySamples : 0;
+                // Convert to microseconds for the agent (matches scaling factor of 100,000 in trainer.py)
+                double avgLatencyUs = avgLatencyNs / 1000.0;
 
                 // 2. Build Request
                 MonitorProto.MetricsRequest request = MonitorProto.MetricsRequest.newBuilder()
                         .setThroughput((int) throughput)
-                        .setLatency((int) avgLatency) // Assuming agent expects total latency avg in ns or us? Check prototype. Proto says int32.
+                        .setLatency((int) avgLatencyUs) 
                         .setSize(0) // Not currently tracking size individually here
                         .setTotThr((int) throughput) // Simplified mapping
-                        .setTotLat((int) avgLatency) 
-                        .setOption(0)
+                        .setTotLat((int) avgLatencyUs) 
+                        .setOption(1) // Option 1 for Batch Tuning
                         .setArrivalRate(0.0)
                         .build();
 

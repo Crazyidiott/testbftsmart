@@ -1,5 +1,8 @@
 #!/bin/bash
 
+
+
+# ./lan_deploy.sh [BatchSize] [Timeout] [ClientRate] [SkipBuild] [ALGORITHM]
 # Load LAN Configuration
 source ./lan_config.sh
 
@@ -31,9 +34,16 @@ if [ -n "$4" ]; then
 else
     SKIP_BUILD="false"
 fi
+
+if [ -n "$5" ]; then
+    ALG_NAME=$5
+else
+    ALG_NAME="BAYESIAN"  # Default algorithm
+fi
 # -----------------------------
 
 echo ">>> [Step 0] Configuring Batch Size to ${MAX_BATCH_SIZE}, Timeout to ${TIMEOUT_VAL}..."
+echo "             Algorithm selected: ${ALG_NAME}"
 # Use sed to update system.config locally before syncing
 CONFIG_FILE="${LOCAL_PROJECT_PATH}/config/system.config"
 
@@ -184,6 +194,7 @@ for i in "${!NODES[@]}"; do
             "${LOCAL_PROJECT_PATH}/config/" "$USER@$host:${REMOTE_PROJECT_PATH}/config/" > /dev/null
     else
         echo "    Syncing code..."
+        # Add server_agent to sync
         rsync -avz -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
             --exclude 'build' \
             --exclude '.git' \
@@ -222,11 +233,52 @@ for i in "${!NODES[@]}"; do
     echo "    Node $i setup complete."
 done
 
+echo ">>> [Step 2.5] Setting up Python Agent Environment (Nodes 0-3)..."
+# Loop only through replicas (0-3), ignoring client (4) for agent setup
+for i in {0..3}; do
+    host=${NODES[$i]}
+    echo "    Setting up Python Agent on Replica $i ($host)..."
+    
+    ssh -i "$KEY" "$USER@$host" "
+        # Check if python3-venv is installed
+        if ! dpkg -s python3-venv >/dev/null 2>&1; then
+             echo '    Installing python3-venv...'
+             sudo apt-get update -qq
+             sudo apt-get install -y python3-venv -qq
+        fi
+
+        cd ${REMOTE_PROJECT_PATH}/server_agent
+        
+        # Kill any existing trainer.py
+        pkill -f trainer.py || true
+
+        # Create virtualenv if not exists
+        if [ ! -d 'py-resdb' ]; then
+            python3 -m venv py-resdb
+        fi
+        
+        # Install dependencies
+        source py-resdb/bin/activate
+        pip install -q --upgrade pip
+        pip install -q -r requirements.txt
+    "
+done
+
 echo ">>> [Step 3] Starting Replicas (Nodes 0-3)..."
 for i in {0..3}; do
     host=${NODES[$i]}
     echo "    Starting Replica $i on $host..."
     
+    # Start the Python Agent FIRST
+    ssh -i "$KEY" "$USER@$host" "
+        cd ${REMOTE_PROJECT_PATH}/server_agent
+        source py-resdb/bin/activate
+        # Run in background with selected algorithm
+        nohup env OPT_ALGORITHM=${ALG_NAME} python3 trainer.py > agent_$i.log 2>&1 &
+        echo '    Python Agent started with algorithm: ${ALG_NAME}'
+    "
+
+    # Then start the Java Server
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}
         nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyServer $i 1000 1024 1024 false nosig 0 > server_$i.log 2>&1 &
@@ -295,6 +347,13 @@ for i in {0..3}; do
     host=${NODES[$i]}
     echo "    Fetching logs from Node $i..."
     scp -i "$KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_$i.log" "./results/server_$i.log"
+    # Added agent logs and experiments data collection
+    scp -i "$KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_agent/agent_$i.log" "./results/agent_$i.log"
+    
+    # Create local directory for experiments data
+    mkdir -p "./results/node_$i_experiments"
+    # Sync experiments directory (CSV/JSON data)
+    rsync -avz -e "ssh -i $KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_agent/experiments/" "./results/node_$i_experiments/"
 done
 
 client_host=${NODES[4]}
