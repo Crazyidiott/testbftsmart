@@ -253,12 +253,12 @@ for i in {0..3}; do
         pkill -f trainer.py || true
 
         # Create virtualenv if not exists
-        if [ ! -d 'py-resdb' ]; then
-            python3 -m venv py-resdb
+        if [ ! -d 'rlenv' ]; then
+            python3 -m venv rlenv
         fi
         
         # Install dependencies
-        source py-resdb/bin/activate
+        source rlenv/bin/activate
         pip install -q --upgrade pip
         pip install -q -r requirements.txt
     "
@@ -273,10 +273,10 @@ for i in {0..3}; do
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}/server_agent
         # Force activation of virtual environment
-        source py-resdb/bin/activate
+        source rlenv/bin/activate
         # Use the python executable from the virtual environment explicitly
         # Run in background with selected algorithm
-        nohup env OPT_ALGORITHM=${ALG_NAME} ./py-resdb/bin/python3 trainer.py > agent_$i.log 2>&1 &
+        nohup env OPT_ALGORITHM=${ALG_NAME} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
         echo '    Python Agent started with algorithm: ${ALG_NAME}'
     "
 
