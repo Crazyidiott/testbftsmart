@@ -241,6 +241,11 @@ for i in {0..3}; do
     # Start the Python Agent FIRST
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}/server_agent
+        
+        # Safety: Kill only the EXACT python process running trainer.py, beware of killing the shell itself
+        # Using full path matching or pgrep to be safer
+        pgrep -f "python3.*trainer.py" | xargs -r kill -9
+        
         # Force activation of virtual environment
         source rlenv/bin/activate
         # Use the python executable from the virtual environment explicitly
