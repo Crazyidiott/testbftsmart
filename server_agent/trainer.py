@@ -81,8 +81,8 @@ class DataLogger:
         
         # 创建实验目录
         # Use relative path or workspace path instead of hardcoded ubuntu path
-        base_dir = os.getcwd()
-        self.exp_dir = f"{base_dir}/experiments/{algorithm}_{self.start_time.strftime('%Y%m%d_%H%M%S')}"
+        # Ensure 'experiments' directory exists in the current working directory
+        self.exp_dir = f"experiments/{algorithm}_{self.start_time.strftime('%Y%m%d_%H%M%S')}"
         os.makedirs(self.exp_dir, exist_ok=True)
         
         # 初始化 CSV 文件
