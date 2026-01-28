@@ -246,16 +246,25 @@ for i in {0..3}; do
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}/server_agent
         
-        # Safety: Kill only the EXACT python process running trainer.py, beware of killing the shell itself
-        # Using full path matching or pgrep to be safer
-        pgrep -f "python3.*trainer.py" | xargs -r kill -9
+        # Safety: Kill only the EXACT python process running trainer.py.
+        # We MUST exclude 'bash' because this SSH command itself runs in bash and contains the string 'trainer.py'
+        ps -ef | grep 'python3.*trainer.py' | grep -v grep | grep -v bash | awk '{print \$2}' | xargs -r kill -9
         
         # Force activation of virtual environment
-        source rlenv/bin/activate
+        # source rlenv/bin/activate  <-- NOT NEEDED if we use explicit path below, and can cause issues in non-interactive shell
+        
         # Use the python executable from the virtual environment explicitly
         # Run in background with selected algorithm
-        nohup env OPT_ALGORITHM=${ALG_NAME} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
-        echo '    Python Agent started with algorithm: ${ALG_NAME}'
+        # We wrap in a subshell or ensure 'nohup' doesn't hang the SSH connection
+        
+        echo '    [Remote] Launching Python Agent...'
+        if [ -f rlenv/bin/python3 ]; then
+             nohup env OPT_ALGORITHM=${ALG_NAME} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
+             echo '    Python Agent started with algorithm: ${ALG_NAME}'
+        else
+             echo '    ERROR: rlenv/bin/python3 NOT FOUND. Agent cannot start.'
+             exit 1
+        fi
     "
 
     # Then start the Java Server
