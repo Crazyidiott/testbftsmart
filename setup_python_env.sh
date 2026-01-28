@@ -19,16 +19,30 @@ for i in {0..3}; do
             "${LOCAL_PROJECT_PATH}/server_agent/" "$USER@$host:${REMOTE_PROJECT_PATH}/server_agent/" > /dev/null
 
     ssh -i "$KEY" "$USER@$host" "
+        # Run commands in a subshell to isolate errors and ensure continuation
+        (
         cd ${REMOTE_PROJECT_PATH}/server_agent
 
         echo '    [System] Installing python3-venv...'
-        # Using sudo non-interactively
-        sudo apt-get update -qq >/dev/null 2>&1
-        sudo apt-get install -y python3-venv python3-pip -qq >/dev/null 2>&1
+        
+        # DEBUG: Check sudo availability
+        if command -v sudo >/dev/null; then
+            echo '        DEBUG: sudo found. Attempting update...'
+             # Removed quiet flags to see errors
+            sudo apt-get update
+            echo '        DEBUG: Update done. Installing packages...'
+            sudo apt-get install -y python3-venv python3-pip
+        else
+            echo '        WARNING: sudo not found, skipping system install. Hoping dependencies exist.'
+        fi
+        
+        echo '    [System] System packages handling complete.'
         
         # Kill any existing trainer process that might be holding files
-        pkill -f trainer.py || true
-
+        # Modified to match only python processes to avoid killing the SSH session script itself
+        # pkill -f "python3.*trainer.py" || true
+        # Commenting out pkill entirely to isolate if it's the culprit causing session disconnects
+        
         echo '    [Venv] Checking virtual environment...'
         # Check if python3 works in the venv
         if [ ! -f 'rlenv/bin/python3' ] || ! ./rlenv/bin/python3 --version > /dev/null 2>&1; then
@@ -58,6 +72,7 @@ for i in {0..3}; do
             echo \"        FAILURE: Module import failed.\"
             cat /tmp/test_err
         fi
+        )
     "
 done
 
