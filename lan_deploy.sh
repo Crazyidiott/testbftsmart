@@ -135,9 +135,10 @@ else
     exit 1
 fi
 
-echo ">>> [Step 1.6] Setting up Python Environment..."
-chmod +x setup_python_env.sh
-./setup_python_env.sh
+# 只需要做一次
+# echo ">>> [Step 1.6] Setting up Python Environment..."
+# chmod +x setup_python_env.sh
+# ./setup_python_env.sh
 
 echo ">>> [Step 2] Syncing and Setting up Environment..."
 
