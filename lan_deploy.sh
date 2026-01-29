@@ -291,23 +291,11 @@ sleep 10
 
 echo ">>> [Step 4] Starting Client (Node 4)..."
 client_host=${NODES[4]}
-
-# Choose client type based on DURATION_SECONDS environment variable
-# If DURATION_SECONDS is set, use TimedLatencyClient; otherwise use AsyncLatencyClient
-if [ -n "$DURATION_SECONDS" ]; then
-    echo "    Using TimedLatencyClient for ${DURATION_SECONDS} seconds..."
-    ssh -i "$KEY" "$USER@$client_host" "
-        cd ${REMOTE_PROJECT_PATH}
-        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.TimedLatencyClient 1001 10 ${DURATION_SECONDS} 1024 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
-    "
-else
-    echo "    Using AsyncLatencyClient (200000 ops per client)..."
-    # The last argument is CLIENT_RATE_PER_THREAD
-    ssh -i "$KEY" "$USER@$client_host" "
-        cd ${REMOTE_PROJECT_PATH}
-        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
-    "
-fi
+# The last argument is CLIENT_RATE_PER_THREAD
+ssh -i "$KEY" "$USER@$client_host" "
+    cd ${REMOTE_PROJECT_PATH}
+    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
+"
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
     # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 true false true > client.log 2>&1 &
 
@@ -316,34 +304,15 @@ echo "    Client started."
 
 # Replace fixed sleep with dynamic wait
 echo "    Waiting for Client to finish..."
-
-# Calculate max wait time based on client type
-if [ -n "$DURATION_SECONDS" ]; then
-    # For TimedLatencyClient, wait for duration + 60s buffer
-    MAX_WAIT=$((DURATION_SECONDS + 60))
-    CLIENT_PATTERN="TimedLatencyClient\|AsyncLatencyClient"
-else
-    # For AsyncLatencyClient, use original timeout
-    MAX_WAIT=120
-    CLIENT_PATTERN="AsyncLatencyClient"
-fi
-
-MAX_RETRIES=$((MAX_WAIT / 3))
+MAX_RETRIES=40 # 40 * 3s = ~120s max
 COUNT=0
 client_host=${NODES[4]}
 
-echo "    Max wait time: ${MAX_WAIT}s (checking every 3s)"
-
 while [ $COUNT -lt $MAX_RETRIES ]; do
     sleep 3
-    # Check if client is running
-    if ssh -i "$KEY" "$USER@$client_host" "pgrep -f '${CLIENT_PATTERN}'" > /dev/null 2>&1; then
-        # Print progress every 10 checks (~30s)
-        if [ $((COUNT % 10)) -eq 0 ]; then
-            echo "    Still running... ($((COUNT * 3))s elapsed)"
-        else
-            echo -n "."
-        fi
+    # Check if AsyncLatencyClient is running
+    if ssh -i "$KEY" "$USER@$client_host" "pgrep -f AsyncLatencyClient" > /dev/null 2>&1; then
+        echo -n "."
         ((COUNT++))
     else
         echo ""
@@ -353,8 +322,8 @@ while [ $COUNT -lt $MAX_RETRIES ]; do
 done
 
 if [ $COUNT -ge $MAX_RETRIES ]; then
-    echo "    WARNING: Client timed out (running longer than ${MAX_WAIT}s). Force killing..."
-    ssh -i "$KEY" "$USER@$client_host" "pkill -f 'TimedLatencyClient\|AsyncLatencyClient'"
+    echo "    WARNING: Client timed out (running longer than 120s). Force killing..."
+    ssh -i "$KEY" "$USER@$client_host" "pkill -f AsyncLatencyClient"
 fi
 
 # COMMENTED OUT STEP 5 FOR STABLE BENCHMARKING
