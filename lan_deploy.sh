@@ -40,6 +40,12 @@ if [ -n "$5" ]; then
 else
     ALG_NAME="BAYESIAN"  # Default algorithm
 fi
+# Supported algorithms:
+#   STATIC   - No agent, use system.config parameters directly
+#   MOCK     - Use mock_agent.py (for testing communication)
+#   BAYESIAN - Bayesian Optimization (trainer.py)
+#   PPO      - Proximal Policy Optimization (trainer.py)
+#   SA       - Simulated Annealing (trainer.py)
 # -----------------------------
 
 echo ">>> [Step 0] Configuring Batch Size to ${MAX_BATCH_SIZE}, Timeout to ${TIMEOUT_VAL}..."
@@ -171,6 +177,10 @@ for i in "${!NODES[@]}"; do
         echo "    [Cleanup] Removing currentView..."
         rm -rf testbftsmart/config/currentView*
         
+        echo "    [Cleanup] Removing old ML model files..."
+        rm -f testbftsmart/server_agent/bo_model.pkl
+        rm -f testbftsmart/server_agent/ppo_model.pth
+        
         # --- Verification Step ---
         echo "    [Verify] Checking for remaining processes..."
         REMAINING_PROCS=$(ps aux | grep -E "bftsmart|CounterServer|ThroughputLatencyServer|CounterClient|ThroughputLatencyClient" | grep -v grep)
@@ -258,21 +268,29 @@ for i in {0..3}; do
         # Run in background with selected algorithm
         # We wrap in a subshell or ensure 'nohup' doesn't hang the SSH connection
         
-        echo '    [Remote] Launching Python Agent...'
-        if [ -f rlenv/bin/python3 ]; then
-             # === MOCK AGENT MODE (for testing dynamic tuning) ===
-             # Use mock_agent.py for testing, trainer.py for production
-             # Options: --mode random|fixed|incremental
-             # Use 'fixed' mode first to verify the communication works correctly
-             nohup ./rlenv/bin/python3 mock_agent.py --mode fixed > agent_$i.log 2>&1 &
-             echo '    Mock Agent started (fixed mode) for testing dynamic tuning.'
-             
-             # === PRODUCTION MODE (uncomment below, comment above) ===
-             # nohup env OPT_ALGORITHM=${ALG_NAME} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
-             # echo '    Python Agent started with algorithm: ${ALG_NAME}'
+        # ============ STATIC MODE: No agent needed ============
+        if [ \"${ALG_NAME}\" == \"STATIC\" ]; then
+            echo '    [STATIC MODE] No Python Agent needed - using system.config parameters'
+        # ============ MOCK MODE: Use mock_agent.py ============
+        elif [ \"${ALG_NAME}\" == \"MOCK\" ]; then
+            echo '    [Remote] Launching Mock Agent...'
+            if [ -f rlenv/bin/python3 ]; then
+                 nohup ./rlenv/bin/python3 mock_agent.py --mode fixed > agent_$i.log 2>&1 &
+                 echo '    Mock Agent started (fixed mode)'
+            else
+                 echo '    ERROR: rlenv/bin/python3 NOT FOUND. Agent cannot start.'
+                 exit 1
+            fi
+        # ============ DYNAMIC MODE: Start Python Agent (trainer.py) ============
         else
-             echo '    ERROR: rlenv/bin/python3 NOT FOUND. Agent cannot start.'
-             exit 1
+            echo '    [Remote] Launching Python Agent...'
+            if [ -f rlenv/bin/python3 ]; then
+                 nohup env OPT_ALGORITHM=${ALG_NAME} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
+                 echo '    Python Agent started with algorithm: ${ALG_NAME}'
+            else
+                 echo '    ERROR: rlenv/bin/python3 NOT FOUND. Agent cannot start.'
+                 exit 1
+            fi
         fi
     "
 
@@ -294,7 +312,7 @@ client_host=${NODES[4]}
 # The last argument is CLIENT_RATE_PER_THREAD
 ssh -i "$KEY" "$USER@$client_host" "
     cd ${REMOTE_PROJECT_PATH}
-    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
+    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 800000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
 "
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
     # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 true false true > client.log 2>&1 &
@@ -304,7 +322,7 @@ echo "    Client started."
 
 # Replace fixed sleep with dynamic wait
 echo "    Waiting for Client to finish..."
-MAX_RETRIES=40 # 40 * 3s = ~120s max
+MAX_RETRIES=100 # 40 * 3s = ~120s max
 COUNT=0
 client_host=${NODES[4]}
 

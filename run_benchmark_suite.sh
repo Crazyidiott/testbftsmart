@@ -29,6 +29,11 @@ METRIC_MODE="TIME"
 # Change this to switch environments
 DEPLOY_SCRIPT="./lan_deploy.sh"
 
+# Algorithm to use for parameter tuning
+# Options: "STATIC" (no tuning), "BAYESIAN", "PPO", etc.
+# For static benchmarking without RL agent, use "STATIC"
+ALGORITHM="STATIC"
+
 # Replace -1 with explicit small values (e.g. 5ms) for "Small Timeout"
 BATCH_TIMEOUTS=(
     5 5 5       # Group 1 (Small TO)
@@ -85,7 +90,7 @@ for ((i=0; i<$count; i++)); do
         SKIP_ARG="true"
     fi
 
-    $DEPLOY_SCRIPT "$BATCH_SIZE" "$TIMEOUT" "$RATE" "$SKIP_ARG"
+    $DEPLOY_SCRIPT "$BATCH_SIZE" "$TIMEOUT" "$RATE" "$SKIP_ARG" "$ALGORITHM"
 
     # 3. Wait a bit for file transfer to finish (lan_deploy usually does scp at the end)
     sleep 2

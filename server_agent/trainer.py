@@ -99,12 +99,12 @@ T_horizon = 20
 # ============= 动作空间配置 =============
 # 与 mock_agent.py 保持一致的保守范围，避免极端值导致系统不稳定
 # BatchSize: 100-2000, 步长 100
-# BatchTimeout: 10-200 ms, 步长 10
+# BatchTimeout: 50-200 ms, 步长 10 (最小值从10改为50，避免超时过短导致请求超时)
 BATCH_SIZE_MIN = 100
 BATCH_SIZE_MAX = 2000
 BATCH_SIZE_STEP = 100
 
-BATCH_TIMEOUT_MIN = 10
+BATCH_TIMEOUT_MIN = 50  # 增大最小值，避免极端情况导致请求超时
 BATCH_TIMEOUT_MAX = 200
 BATCH_TIMEOUT_STEP = 10
 
@@ -376,7 +376,7 @@ class BayesianOptimizer(OptimizerBase):
         self.min_exploration_weight = 0.1 
         
         # ============ 3. 滑动窗口配置 ============
-        self.window_size = 400 
+        self.window_size = 50  # 减小窗口大小，避免 GP 拟合时间过长
         
         # 历史数据
         self.X_history = []
@@ -1537,9 +1537,28 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
             return monitor_pb2.MetricsResponse(BatchSize=SeqNum, BatchTimeout=0)
     
     def Connect(self, request, context):
-        """处理节点间的共识协议（用于 option == 2）"""
+        """
+        处理 Connect 请求
+        
+        有两种情况：
+        1. 初始握手（Java 客户端连接时）- 直接返回时间戳
+        2. 共识协议（option == 2 时节点间通信）- 等待 QUORUM 个响应
+        
+        区分方式：如果 timestamp 是一个很大的毫秒级时间戳（> 1e12），
+        说明是初始握手；如果是一个小数值（参数值），说明是共识协议。
+        """
         recv_value = request.timestamp
         
+        # 判断是否为初始握手：毫秒级时间戳通常 > 1e12 (约 2001 年之后的时间)
+        # 而共识协议传递的值是参数值，通常 < 10000
+        if recv_value > 1e12:
+            # 初始握手请求 - 直接返回当前时间戳
+            server_time = int(time.time() * 1000)
+            print(f"[{ALGORITHM}] Initial handshake received. Client timestamp: {recv_value}")
+            print(f"[{ALGORITHM}] Responding with server timestamp: {server_time}")
+            return monitor_pb2.Timestamp(timestamp=server_time)
+        
+        # 共识协议（option == 2）
         self.scores_file.write(f'{recv_value}\n')
         self.scores_file.flush()
         self.scores_file.write(str(action_pool) + '\n')
