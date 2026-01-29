@@ -22,7 +22,7 @@ public class RLAgentConnector {
     private boolean connected = false;
 
     // Configuration
-    private static final int WARMUP_TIME_MS = 10000; // 30s warmup
+    private static final int WARMUP_TIME_MS = 10000; // 10s warmup
     private static final int MONITOR_INTERVAL_MS = 1000; // 1s interval
 
     public RLAgentConnector(ServiceReplica serviceReplica, ThroughputLatencyServer serverInstance) {

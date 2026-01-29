@@ -247,9 +247,9 @@ for i in {0..3}; do
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}/server_agent
         
-        # Safety: Kill only the EXACT python process running trainer.py.
-        # We MUST exclude 'bash' because this SSH command itself runs in bash and contains the string 'trainer.py'
-        ps -ef | grep 'python3.*trainer.py' | grep -v grep | grep -v bash | awk '{print \$2}' | xargs -r kill -9
+        # Safety: Kill only the EXACT python process running trainer.py or mock_agent.py.
+        # We MUST exclude 'bash' because this SSH command itself runs in bash and contains the string
+        ps -ef | grep 'python3.*trainer.py\|python3.*mock_agent.py' | grep -v grep | grep -v bash | awk '{print \$2}' | xargs -r kill -9
         
         # Force activation of virtual environment
         # source rlenv/bin/activate  <-- NOT NEEDED if we use explicit path below, and can cause issues in non-interactive shell
@@ -260,8 +260,15 @@ for i in {0..3}; do
         
         echo '    [Remote] Launching Python Agent...'
         if [ -f rlenv/bin/python3 ]; then
-             nohup env OPT_ALGORITHM=${ALG_NAME} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
-             echo '    Python Agent started with algorithm: ${ALG_NAME}'
+             # === MOCK AGENT MODE (for testing dynamic tuning) ===
+             # Use mock_agent.py for testing, trainer.py for production
+             # Options: --mode random|fixed|incremental
+             nohup ./rlenv/bin/python3 mock_agent.py --mode random > agent_$i.log 2>&1 &
+             echo '    Mock Agent started (random mode) for testing dynamic tuning.'
+             
+             # === PRODUCTION MODE (uncomment below, comment above) ===
+             # nohup env OPT_ALGORITHM=${ALG_NAME} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
+             # echo '    Python Agent started with algorithm: ${ALG_NAME}'
         else
              echo '    ERROR: rlenv/bin/python3 NOT FOUND. Agent cannot start.'
              exit 1
