@@ -49,15 +49,17 @@ class MockAgentServicer(monitor_pb2_grpc.MetricsServiceServicer):
         self.request_count = 0
         self.start_time = time.time()
         
-        # 固定模式的参数
-        self.fixed_batch_size = 5000
-        self.fixed_batch_timeout = 500
+        # 固定模式的参数 - 使用保守值确保系统稳定
+        self.fixed_batch_size = 500
+        self.fixed_batch_timeout = 50
         
         # 增量模式的索引
         self.size_index = 0
         self.timeout_index = 0
         
         print(f"[MockAgent] 初始化完成，模式: {mode}")
+        if mode == 'fixed':
+            print(f"[MockAgent] 固定参数: BatchSize={self.fixed_batch_size}, BatchTimeout={self.fixed_batch_timeout}")
     
     def Connect(self, request, context):
         """处理握手请求"""
