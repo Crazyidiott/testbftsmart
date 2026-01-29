@@ -110,6 +110,11 @@ public class RLAgentConnector {
                 // Convert to microseconds for the agent (matches scaling factor of 100,000 in trainer.py)
                 double avgLatencyUs = avgLatencyNs / 1000.0;
 
+                // Debug logging
+                logger.info(String.format("[Metrics] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us",
+                    snapshot.timeWindow, snapshot.ops, snapshot.latencySum, snapshot.latencySamples,
+                    throughput, avgLatencyUs));
+
                 // 2. Build Request
                 MonitorProto.MetricsRequest request = MonitorProto.MetricsRequest.newBuilder()
                         .setThroughput((int) throughput)

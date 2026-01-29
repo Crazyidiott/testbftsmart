@@ -27,14 +27,14 @@ import monitor_pb2
 import monitor_pb2_grpc
 
 # ============= 参数范围配置 =============
-# 与 trainer.py 中的 A_values, B_values 保持一致
-BATCH_SIZE_MIN = 1000
-BATCH_SIZE_MAX = 20000
-BATCH_SIZE_STEP = 500
+# 使用较保守的范围进行测试，避免极端值导致系统不稳定
+BATCH_SIZE_MIN = 100
+BATCH_SIZE_MAX = 2000
+BATCH_SIZE_STEP = 100
 
-BATCH_TIMEOUT_MIN = 100
-BATCH_TIMEOUT_MAX = 3000
-BATCH_TIMEOUT_STEP = 100
+BATCH_TIMEOUT_MIN = 10
+BATCH_TIMEOUT_MAX = 200
+BATCH_TIMEOUT_STEP = 10
 
 # 预定义的合理参数组合
 BATCH_SIZE_VALUES = list(range(BATCH_SIZE_MIN, BATCH_SIZE_MAX + 1, BATCH_SIZE_STEP))
@@ -78,11 +78,16 @@ class MockAgentServicer(monitor_pb2_grpc.MetricsServiceServicer):
         throughput = request.throughput
         latency = request.latency
         option = request.option
+        arrival_rate = request.arrival_rate
         
         elapsed = time.time() - self.start_time
         
-        print(f"\n[MockAgent] === 请求 #{self.request_count} (运行 {elapsed:.1f}s) ===")
-        print(f"           收到指标: throughput={throughput}, latency={latency}, option={option}")
+        # 更详细的日志，包含所有字段
+        print(f"\n[MockAgent] === 请求 #{self.request_count} (Agent运行 {elapsed:.1f}s) ===")
+        print(f"           throughput={throughput} ops/s")
+        print(f"           latency={latency} us")
+        print(f"           size={request.size}, tot_thr={request.tot_thr}, tot_lat={request.tot_lat}")
+        print(f"           option={option}, arrival_rate={arrival_rate}")
         
         # 根据模式生成参数
         if self.mode == 'fixed':
