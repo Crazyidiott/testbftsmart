@@ -15,6 +15,7 @@ import monitor_pb2_grpc
 import os
 import time
 import threading
+import re
 from abc import ABC, abstractmethod
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import Matern
@@ -29,6 +30,64 @@ warnings.filterwarnings('ignore')
 # ============= 配置 =============
 ALGORITHM = os.environ.get('OPT_ALGORITHM', 'BAYESIAN')  # PPO, BAYESIAN, SA
 
+# ============= 从 lan_config.sh 读取节点地址 =============
+def load_nodes_from_config(config_path=None):
+    """
+    从 lan_config.sh 读取节点 IP 地址
+    
+    Returns:
+        dict: {node_id: "ip:port"} 格式的地址映射
+    """
+    if config_path is None:
+        # 尝试多个可能的路径
+        possible_paths = [
+            os.path.join(os.path.dirname(__file__), '..', 'lan_config.sh'),
+            '/home/ubuntu/work/testbftsmart/lan_config.sh',
+            './lan_config.sh',
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                config_path = path
+                break
+    
+    if config_path is None or not os.path.exists(config_path):
+        print("[Config] Warning: lan_config.sh not found, using default addresses")
+        return {
+            0: '127.0.0.1:45678',
+            1: '127.0.0.1:45678',
+            2: '127.0.0.1:45678',
+            3: '127.0.0.1:45678',
+        }
+    
+    try:
+        with open(config_path, 'r') as f:
+            content = f.read()
+        
+        # 使用正则表达式匹配 NODES=("ip1" "ip2" ...) 格式
+        match = re.search(r'NODES=\(([^)]+)\)', content)
+        if match:
+            nodes_str = match.group(1)
+            # 提取所有 IP 地址
+            ips = re.findall(r'"([^"]+)"', nodes_str)
+            
+            # 构建地址映射 (前4个是 replicas，端口 45678)
+            addr = {}
+            for i, ip in enumerate(ips[:4]):  # 只取前4个 replica 节点
+                addr[i] = f'{ip}:45678'
+            
+            print(f"[Config] Loaded {len(addr)} node addresses from {config_path}")
+            for node_id, address in addr.items():
+                print(f"[Config]   Node {node_id}: {address}")
+            
+            return addr
+        else:
+            print("[Config] Warning: Could not parse NODES from lan_config.sh")
+            return {0: '127.0.0.1:45678', 1: '127.0.0.1:45678', 2: '127.0.0.1:45678', 3: '127.0.0.1:45678'}
+    
+    except Exception as e:
+        print(f"[Config] Error loading config: {e}")
+        return {0: '127.0.0.1:45678', 1: '127.0.0.1:45678', 2: '127.0.0.1:45678', 3: '127.0.0.1:45678'}
+
 # PPO 超参数
 learning_rate = 0.0005
 gamma = 0.98
@@ -37,22 +96,43 @@ eps_clip = 0.1
 K_epoch = 3
 T_horizon = 20
 
-# 动作空间
-A_values = torch.arange(1000, 20001, 500) # 10族
-B_values = torch.arange(100, 3001, 100) # 20族
+# ============= 动作空间配置 =============
+# 与 mock_agent.py 保持一致的保守范围，避免极端值导致系统不稳定
+# BatchSize: 100-2000, 步长 100
+# BatchTimeout: 10-200 ms, 步长 10
+BATCH_SIZE_MIN = 100
+BATCH_SIZE_MAX = 2000
+BATCH_SIZE_STEP = 100
+
+BATCH_TIMEOUT_MIN = 10
+BATCH_TIMEOUT_MAX = 200
+BATCH_TIMEOUT_STEP = 10
+
+A_values = torch.arange(BATCH_SIZE_MIN, BATCH_SIZE_MAX + 1, BATCH_SIZE_STEP)   # BatchSize: [100, 200, ..., 2000]
+B_values = torch.arange(BATCH_TIMEOUT_MIN, BATCH_TIMEOUT_MAX + 1, BATCH_TIMEOUT_STEP)  # BatchTimeout: [10, 20, ..., 200]
 C_values = torch.tensor([8, 16, 32, 64, 128, 256, 512, 1024])
 
-# Reward 权重
-c_thr = 1.0
-c_lat = -100.0
+print(f"[Config] Action space:")
+print(f"[Config]   BatchSize: {A_values.min().item()} - {A_values.max().item()}, {len(A_values)} values")
+print(f"[Config]   BatchTimeout: {B_values.min().item()} - {B_values.max().item()}, {len(B_values)} values")
 
-# 网络配置（用于 option == 2 的通信）
-# Update addresses to match lan_config.sh: 172.31.15.219, 172.31.4.11, 172.31.10.49, 172.31.10.254
-addr = ['172.31.15.219:45678',
-        '172.31.4.11:45678',
-        '172.31.10.49:45678',
-        '172.31.10.254:45678']
-f = int((len(addr)-1)/3)
+# ============= 缩放因子配置 =============
+# 基于实际观测数据设置：
+# - 吞吐量: 40,000 - 60,000 ops/s (正常运行时)
+# - 延迟: 10,000 - 30,000 微秒 (10-30ms)
+THROUGHPUT_SCALE = 10000.0   # 预期最大吞吐量约 10k ops/s
+LATENCY_SCALE = 5000.0       # 预期最大延迟约 50ms = 50,000 微秒
+REWARD_SCALE = 100000.0       # Reward 归一化因子
+
+# Reward 权重 (吞吐量最大化，延迟最小化)
+# 使用归一化后的值计算，权重更平衡
+c_thr = 1.0       # 吞吐量权重
+c_lat = -1.0      # 延迟权重 (使用归一化后的值，不需要 -100 这么大)
+
+# ============= 节点地址配置 =============
+# 从 lan_config.sh 动态读取
+addr = load_nodes_from_config()
+f = max(1, (len(addr) - 1) // 3)  # 容错节点数
 QUORUM = 2 * f + 1
 
 # 全局状态（仅用于通信协调）
@@ -65,8 +145,19 @@ save_episode = 500
 
 # ============= 工具函数 =============
 def Normalized(state):
-    """状态归一化, 修改成了硬编码最大归一化而不是每个不同性质的变量的平均归一化"""
-    max_vals = np.array([600000.0, 100000.0, 10000.0, 1e9, 1e9, 1e9, 600000.0])
+    """
+    状态归一化 - 基于实际观测数据设置上限
+    state: [throughput, latency, payload, tot_thr, tot_lat, tot_size, arrival_rate]
+    """
+    max_vals = np.array([
+        THROUGHPUT_SCALE,    # throughput: 100k ops/s
+        LATENCY_SCALE,       # latency: 50k 微秒 = 50ms  
+        10000.0,             # payload: 10KB
+        1e9,                 # tot_thr: 累计值，使用大值
+        1e9,                 # tot_lat: 累计值，使用大值
+        1e9,                 # tot_size: 累计值，使用大值
+        THROUGHPUT_SCALE,    # arrival_rate: 与吞吐量同量级
+    ])
     return state / (max_vals[:len(state)] + 1e-8)
 
 
@@ -302,13 +393,16 @@ class BayesianOptimizer(OptimizerBase):
         self.pending_experience = None
         self.model_path = "bo_model.pkl"
         
-        # ============ 5. Reward 归一化常数 (请根据实际环境调整) ============
-        # 设定这些值为系统的"物理极限"或"期望最大值"
-        # 这保证了 reward 函数是静态的，不会像滑动平均那样乱动
-        self.MAX_THR_LIMIT = 600000.0  # 假设最大吞吐 100k TPS
-        self.MAX_LAT_LIMIT = 4000000.0    # 假设最大延迟 2000 ms
+        # ============ 5. Reward 归一化常数 ============
+        # 使用全局缩放因子，基于实际观测数据设置
+        # 吞吐量: 40k-60k ops/s, 延迟: 10k-30k 微秒
+        self.MAX_THR_LIMIT = THROUGHPUT_SCALE  # 100k ops/s
+        self.MAX_LAT_LIMIT = LATENCY_SCALE * 2  # 100k 微秒 = 100ms (给延迟留更多空间)
         
         print("[BO] Sliding Window Contextual BO initialized (Fixed Max Norm)")
+        print(f"[BO]   MAX_THR_LIMIT: {self.MAX_THR_LIMIT}, MAX_LAT_LIMIT: {self.MAX_LAT_LIMIT}")
+        print(f"[BO]   Action space: BatchSize [{A_values.min().item()}-{A_values.max().item()}], "
+              f"BatchTimeout [{B_values.min().item()}-{B_values.max().item()}]")
         
     def _compute_derived_features(self, state, batch_size, batch_timeout):
         """构建 Context + Action + Derived Features"""
@@ -520,14 +614,19 @@ class SimulatedAnnealing(OptimizerBase):
         self.cooling_rate = 0.99
         
         # ============= 动态归一化参数 =============
-        self.ref_thr = 1000.0
-        self.ref_lat = 100.0
+        # 使用全局缩放因子作为初始参考值
+        self.ref_thr = THROUGHPUT_SCALE / 10  # 初始参考吞吐量 10k
+        self.ref_lat = LATENCY_SCALE / 5      # 初始参考延迟 10k 微秒
         self.decay_rate = 0.8
         
         # ============= 状态追踪 =============
+        # 使用动作空间的中间值作为初始参数
+        initial_batch = A_values[len(A_values) // 2].item()    # 动作空间中间值
+        initial_timeout = B_values[len(B_values) // 2].item()  # 动作空间中间值
+        
         self.current_params = {
-            'batch': 5000,
-            'timeout': 500
+            'batch': initial_batch,
+            'timeout': initial_timeout
         }
         
         self.previous_score = None 
@@ -535,8 +634,8 @@ class SimulatedAnnealing(OptimizerBase):
         
         self.best_score = float('-inf')
         self.best_params = {
-            'batch': 5000,
-            'timeout': 500
+            'batch': initial_batch,
+            'timeout': initial_timeout
         }
         
         self.no_improvement_count = 0
@@ -551,6 +650,7 @@ class SimulatedAnnealing(OptimizerBase):
         # 修改1：添加 .item() 让打印格式更清晰
         print(f"[SA]    - Action space: Batch [{A_values.min().item()}-{A_values.max().item()}], "
               f"Timeout [{B_values.min().item()}-{B_values.max().item()}]")
+        print(f"[SA]    - Initial params: Batch={initial_batch}, Timeout={initial_timeout}")
         print(f"[SA]    - Temperature: {self.temperature:.3f}, Cooling: {self.cooling_rate}")
 
     def get_exploration_range(self):
@@ -910,19 +1010,25 @@ class PPO(nn.Module, OptimizerBase):
     def modelUpdate(self, batch_state, option):
         """PPO 的完整更新逻辑"""
         
+        # 使用动作空间的中间值作为初始参数
+        initial_batch = A_values[len(A_values) // 2].item()
+        initial_timeout = B_values[len(B_values) // 2].item()
+        
         # 初始化
         if len(self.old_state) == 0:
             self.old_state = batch_state
             self.lastO = option
             if option == 1:
-                self.lastA, self.lastB = 10000, 1000
+                self.lastA, self.lastB = initial_batch, initial_timeout
                 return self.lastA, self.lastB
             else:  # option == 2
                 self.lastC = 128
                 return self.lastC, 0
 
-        # 计算 reward
-        reward = c_thr * self.old_state[0] + c_lat * self.old_state[1]
+        # 计算 reward (使用归一化后的值)
+        norm_thr = self.old_state[0] / THROUGHPUT_SCALE
+        norm_lat = self.old_state[1] / LATENCY_SCALE
+        reward = c_thr * norm_thr + c_lat * norm_lat  # c_thr=1.0, c_lat=-1.0
 
         norm_state = Normalized(self.old_state)
         prob_a, prob_b, prob_c = self.pi(torch.from_numpy(norm_state).float())
@@ -931,15 +1037,15 @@ class PPO(nn.Module, OptimizerBase):
         b = (torch.abs(B_values - self.lastB)).argmin().item()
         c = (torch.abs(C_values - self.lastC)).argmin().item()
 
-        # 存储经验
+        # 存储经验 (reward 已经是归一化后的值，不需要再除以 40000)
         if self.lastO == 1:
-            self.put_data((norm_state, a, b, 0, reward / 40000, Normalized(batch_state),
+            self.put_data((norm_state, a, b, 0, reward, Normalized(batch_state),
                           prob_a[a].item(), prob_b[b].item(), 1.0))
         else:  # lastO == 2
-            self.put_data((norm_state, 0, 0, c, reward / 40000, Normalized(batch_state),
+            self.put_data((norm_state, 0, 0, c, reward, Normalized(batch_state),
                           1.0, 1.0, prob_c[c].item()))
         
-        self.score += reward / 40000
+        self.score += reward
 
         # 训练
         if len(self.data) >= 1:
@@ -990,8 +1096,8 @@ class StaticOptimizer(OptimizerBase):
         super().__init__()
         
         # 初始参数（从动作空间中选择中间值作为默认值）
-        self.default_batch_size = A_values[len(A_values)//2].item()  # 10000
-        self.default_batch_timeout = B_values[len(B_values)//2].item()  # 2500
+        self.default_batch_size = A_values[len(A_values)//2].item()
+        self.default_batch_timeout = B_values[len(B_values)//2].item()
         self.default_c_parameter = 128  # 默认的 C 参数
         
         # 是否已经初始化
@@ -1022,9 +1128,11 @@ class StaticOptimizer(OptimizerBase):
                 return self.lastC, 0
         
         # ========== 后续调用：计算 reward 但不改变参数 ==========
-        # 计算当前 reward（用于监控，但不影响决策）
-        reward = c_thr * batch_state[0] + c_lat * batch_state[1]
-        self.score += reward / 40000
+        # 计算当前 reward（使用归一化值）
+        norm_thr = batch_state[0] / THROUGHPUT_SCALE
+        norm_lat = batch_state[1] / LATENCY_SCALE
+        reward = c_thr * norm_thr + c_lat * norm_lat
+        self.score += reward
         
         # 更新状态
         self.old_state = batch_state
@@ -1078,18 +1186,24 @@ class CyclicConfigOptimizer(OptimizerBase):
         
         Args:
             config_list: 配置列表，格式为 [(batch_size, batch_timeout), ...]
-                        默认使用用户提供的4个配置
+                        默认使用动作空间中的多个配置
             cycle_interval: 切换周期（秒），默认10秒
         """
         super().__init__()
         
-        # 默认配置列表（用户提供的4个配置）
+        # 默认配置列表 - 使用动作空间中有意义的不同配置
         if config_list is None:
+            # 从动作空间中选择代表性配置
+            min_bs, max_bs = A_values.min().item(), A_values.max().item()
+            min_bt, max_bt = B_values.min().item(), B_values.max().item()
+            mid_bs = A_values[len(A_values) // 2].item()
+            mid_bt = B_values[len(B_values) // 2].item()
+            
             self.config_list = [
-                (5000, 1000),      # 配置1
-                (5000, 1000),     # 配置2
-                (5000, 1000),     # 配置3
-                (5000, 1000)       # 配置4
+                (min_bs, min_bt),   # 最小 batch, 最小 timeout (低延迟)
+                (max_bs, max_bt),   # 最大 batch, 最大 timeout (高吞吐)
+                (mid_bs, mid_bt),   # 中间值
+                (max_bs, min_bt),   # 大 batch, 小 timeout
             ]
         else:
             self.config_list = config_list
@@ -1188,9 +1302,11 @@ class CyclicConfigOptimizer(OptimizerBase):
                 print(f"[CYCLIC] First call (option=2): C={self.lastC}")
                 return self.lastC, 0
         
-        # ========== 计算 reward（用于监控）==========
-        reward = c_thr * batch_state[0] + c_lat * batch_state[1]
-        self.score += reward / 40000
+        # ========== 计算 reward（使用归一化值）==========
+        norm_thr = batch_state[0] / THROUGHPUT_SCALE
+        norm_lat = batch_state[1] / LATENCY_SCALE
+        reward = c_thr * norm_thr + c_lat * norm_lat
+        self.score += reward
         
         # ========== 检查是否需要切换配置 ==========
         if self._should_switch_config():
@@ -1324,9 +1440,14 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
         payload = request.size
         arrival_rate = request.arrival_rate
         
-        # 计算当前 reward
-        current_reward = c_thr * throughput + c_lat * latency if throughput > 0 else 0
-        self.data_logger.log_metrics(throughput, latency, payload, current_reward / 40000)
+        # 计算当前 reward (使用归一化值)
+        if throughput > 0:
+            norm_thr = throughput / THROUGHPUT_SCALE
+            norm_lat = latency / LATENCY_SCALE
+            current_reward = c_thr * norm_thr + c_lat * norm_lat
+        else:
+            current_reward = 0
+        self.data_logger.log_metrics(throughput, latency, payload, current_reward)
         
         # ========== 构造状态 ==========
         new_state = np.array([request.throughput, request.latency, request.size,
@@ -1338,7 +1459,7 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
         self.notify_counter += 1
         print(f"[{ALGORITHM}] Iteration: {self.notify_counter}")
 
-        if self.notify_counter % save_episode:
+        if self.notify_counter % save_episode == 0:
             if hasattr(self.model, 'save_model'):
                 self.model.save_model()
         
