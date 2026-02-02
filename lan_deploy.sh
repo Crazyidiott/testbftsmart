@@ -41,11 +41,15 @@ else
     ALG_NAME="BAYESIAN"  # Default algorithm
 fi
 # Supported algorithms:
-#   STATIC   - No agent, use system.config parameters directly
+#   STATIC   - Fixed parameters (uses BatchSize and Timeout from script arguments)
 #   MOCK     - Use mock_agent.py (for testing communication)
 #   BAYESIAN - Bayesian Optimization (trainer.py)
 #   PPO      - Proximal Policy Optimization (trainer.py)
 #   SA       - Simulated Annealing (trainer.py)
+# Note: All modes support [Metrics] output from RLAgentConnector
+# For STATIC mode, parameters are passed via:
+#   ./lan_deploy.sh <BatchSize> <Timeout> <ClientRate> <SkipBuild> STATIC
+#   Example: ./lan_deploy.sh 500 100 -1 false STATIC
 # -----------------------------
 
 echo ">>> [Step 0] Configuring Batch Size to ${MAX_BATCH_SIZE}, Timeout to ${TIMEOUT_VAL}..."
@@ -268,9 +272,17 @@ for i in {0..3}; do
         # Run in background with selected algorithm
         # We wrap in a subshell or ensure 'nohup' doesn't hang the SSH connection
         
-        # ============ STATIC MODE: No agent needed ============
+        # ============ STATIC MODE: Start Python Agent with STATIC algorithm for metrics output ============
         if [ \"${ALG_NAME}\" == \"STATIC\" ]; then
-            echo '    [STATIC MODE] No Python Agent needed - using system.config parameters'
+            echo '    [STATIC MODE] Starting Python Agent with STATIC algorithm for metrics output...'
+            echo '    Using BatchSize=${MAX_BATCH_SIZE}, BatchTimeout=${TIMEOUT_VAL}'
+            if [ -f rlenv/bin/python3 ]; then
+                 nohup env OPT_ALGORITHM=STATIC STATIC_BATCH_SIZE=${MAX_BATCH_SIZE} STATIC_BATCH_TIMEOUT=${TIMEOUT_VAL} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
+                 echo '    Python Agent started with STATIC algorithm (fixed parameters, metrics enabled)'
+            else
+                 echo '    ERROR: rlenv/bin/python3 NOT FOUND. Agent cannot start.'
+                 exit 1
+            fi
         # ============ MOCK MODE: Use mock_agent.py ============
         elif [ \"${ALG_NAME}\" == \"MOCK\" ]; then
             echo '    [Remote] Launching Mock Agent...'

@@ -1090,20 +1090,40 @@ class PPO(nn.Module, OptimizerBase):
 
 # ============= Static Optimizer =============
 class StaticOptimizer(OptimizerBase):
-    """静态优化器 - 保持初始参数不变"""
+    """静态优化器 - 保持初始参数不变
+    
+    参数可以通过环境变量设置：
+      STATIC_BATCH_SIZE   - 批量大小 (默认: 动作空间中间值)
+      STATIC_BATCH_TIMEOUT - 批量超时 (默认: 动作空间中间值)
+    """
     
     def __init__(self):
         super().__init__()
         
-        # 初始参数（从动作空间中选择中间值作为默认值）
-        self.default_batch_size = A_values[len(A_values)//2].item()
-        self.default_batch_timeout = B_values[len(B_values)//2].item()
+        # 从环境变量读取参数，如果未设置则使用动作空间的中间值
+        env_batch_size = os.environ.get('STATIC_BATCH_SIZE')
+        env_batch_timeout = os.environ.get('STATIC_BATCH_TIMEOUT')
+        
+        if env_batch_size is not None:
+            self.default_batch_size = int(env_batch_size)
+            print(f"[STATIC] BatchSize from environment: {self.default_batch_size}")
+        else:
+            self.default_batch_size = A_values[len(A_values)//2].item()
+            print(f"[STATIC] BatchSize from default (middle of action space): {self.default_batch_size}")
+        
+        if env_batch_timeout is not None:
+            self.default_batch_timeout = int(env_batch_timeout)
+            print(f"[STATIC] BatchTimeout from environment: {self.default_batch_timeout}")
+        else:
+            self.default_batch_timeout = B_values[len(B_values)//2].item()
+            print(f"[STATIC] BatchTimeout from default (middle of action space): {self.default_batch_timeout}")
+        
         self.default_c_parameter = 128  # 默认的 C 参数
         
         # 是否已经初始化
         self.initialized = False
         
-        print(f"[STATIC] Initialized with default parameters:")
+        print(f"[STATIC] Initialized with parameters:")
         print(f"  Batch Size: {self.default_batch_size}")
         print(f"  Batch Timeout: {self.default_batch_timeout}")
         print(f"  C Parameter: {self.default_c_parameter}")
