@@ -41,15 +41,17 @@ else
     ALG_NAME="BAYESIAN"  # Default algorithm
 fi
 # Supported algorithms:
-#   STATIC   - Fixed parameters (uses BatchSize and Timeout from script arguments)
+#   NONE     - No agent at all, uses system.config parameters directly (pure BFT-SMaRt)
+#   STATIC   - Fixed parameters (uses BatchSize and Timeout from script arguments, with metrics)
 #   MOCK     - Use mock_agent.py (for testing communication)
 #   BAYESIAN - Bayesian Optimization (trainer.py)
 #   PPO      - Proximal Policy Optimization (trainer.py)
 #   SA       - Simulated Annealing (trainer.py)
-# Note: All modes support [Metrics] output from RLAgentConnector
-# For STATIC mode, parameters are passed via:
-#   ./lan_deploy.sh <BatchSize> <Timeout> <ClientRate> <SkipBuild> STATIC
-#   Example: ./lan_deploy.sh 500 100 -1 false STATIC
+# 
+# Usage:
+#   ./lan_deploy.sh <BatchSize> <Timeout> <ClientRate> <SkipBuild> <ALGORITHM>
+#   Example: ./lan_deploy.sh 500 100 -1 false NONE     # No agent, uses system.config
+#   Example: ./lan_deploy.sh 500 100 -1 false STATIC   # With agent for metrics
 # -----------------------------
 
 echo ">>> [Step 0] Configuring Batch Size to ${MAX_BATCH_SIZE}, Timeout to ${TIMEOUT_VAL}..."
@@ -65,13 +67,8 @@ else
 fi
 
 # Update batchtimeout
-# For small batches, we want aggressive timeout (wait less). For big batches, we can wait a bit or use -1 (ondemand).
-# Here we set a general strategy: if batch size is small, timeout is small to encourage frequent blocks.
-if [ "$MAX_BATCH_SIZE" -le 20 ]; then
-     TIMEOUT_VAL=-1
-else
-     TIMEOUT_VAL=50
-fi
+# Use the TIMEOUT_VAL passed by the user (or default value)
+# Note: Previously this was overwritten based on batch size, but now we respect user input
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
     sed -i '' "s/system.totalordermulticast.batchtimeout = .*/system.totalordermulticast.batchtimeout = ${TIMEOUT_VAL}/g" "$CONFIG_FILE"
@@ -272,8 +269,12 @@ for i in {0..3}; do
         # Run in background with selected algorithm
         # We wrap in a subshell or ensure 'nohup' doesn't hang the SSH connection
         
+        # ============ NONE MODE: No agent at all, pure BFT-SMaRt ============
+        if [ \"${ALG_NAME}\" == \"NONE\" ]; then
+            echo '    [NONE MODE] No Python Agent - using system.config parameters directly'
+            echo '    BatchSize=${MAX_BATCH_SIZE}, Timeout=${TIMEOUT_VAL} (from system.config)'
         # ============ STATIC MODE: Start Python Agent with STATIC algorithm for metrics output ============
-        if [ \"${ALG_NAME}\" == \"STATIC\" ]; then
+        elif [ \"${ALG_NAME}\" == \"STATIC\" ]; then
             echo '    [STATIC MODE] Starting Python Agent with STATIC algorithm for metrics output...'
             echo '    Using BatchSize=${MAX_BATCH_SIZE}, BatchTimeout=${TIMEOUT_VAL}'
             if [ -f rlenv/bin/python3 ]; then
