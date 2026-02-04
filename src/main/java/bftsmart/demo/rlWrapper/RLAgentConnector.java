@@ -26,7 +26,7 @@ public class RLAgentConnector {
     // 1. lan_deploy.sh's "sleep 10" before client starts (10s)
     // 2. Client's rampup phase (3000ms / 100ms per request = ~30 requests * 10 clients)
     // Total: ~40-45 seconds for system to reach steady state
-    private static final int WARMUP_TIME_MS = 45000; // 45s warmup
+    private static final int WARMUP_TIME_MS = 10000; // 10s warmup
     private static final int MONITOR_INTERVAL_MS = 1000; // 1s interval
 
     public RLAgentConnector(ServiceReplica serviceReplica, ThroughputLatencyServer serverInstance) {
