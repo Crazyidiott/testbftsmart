@@ -80,6 +80,12 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
     private AtomicLong timeBasedTotalLatency = new AtomicLong(0);
     private AtomicLong timeBasedLatSamples = new AtomicLong(0);
 
+    // ============ 新增：消息大小和到达率统计 ============
+    private AtomicLong timeBasedTotalSize = new AtomicLong(0);      // 累计消息大小（字节）
+    private AtomicLong timeBasedSizeSamples = new AtomicLong(0);    // 消息数量（用于计算平均大小）
+    private AtomicLong timeBasedArrivalCount = new AtomicLong(0);   // 1秒内收到的请求数（到达率）
+    // ===================================================
+
     // ============ Goodput 统计器 ============
     // 总处理消息数（不含重复，用于计算 Goodput）
     private AtomicLong totalGoodputOps = new AtomicLong(0);
@@ -96,12 +102,21 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         public long latencySum;
         public long latencySamples;
         public long timeWindow; // in ms
+        
+        // 新增字段
+        public long totalSize;       // 累计消息大小（字节）
+        public long sizeSamples;     // 消息数量
+        public long arrivalCount;    // 到达请求数
 
-        public MetricsSnapshot(long ops, long latencySum, long latencySamples, long timeWindow) {
+        public MetricsSnapshot(long ops, long latencySum, long latencySamples, long timeWindow,
+                               long totalSize, long sizeSamples, long arrivalCount) {
             this.ops = ops;
             this.latencySum = latencySum;
             this.latencySamples = latencySamples;
             this.timeWindow = timeWindow;
+            this.totalSize = totalSize;
+            this.sizeSamples = sizeSamples;
+            this.arrivalCount = arrivalCount;
         }
     }
 
@@ -115,10 +130,15 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         long ops = timeBasedOpsCount.getAndSet(0);
         long latSum = timeBasedTotalLatency.getAndSet(0);
         long latSamp = timeBasedLatSamples.getAndSet(0);
+        
+        // 新增：重置 size 和 arrival 统计
+        long totalSize = timeBasedTotalSize.getAndSet(0);
+        long sizeSamp = timeBasedSizeSamples.getAndSet(0);
+        long arrivalCnt = timeBasedArrivalCount.getAndSet(0);
 
         lastMetricsResetTime = now;
 
-        return new MetricsSnapshot(ops, latSum, latSamp, window);
+        return new MetricsSnapshot(ops, latSum, latSamp, window, totalSize, sizeSamp, arrivalCnt);
     }
 
     // ============ Goodput 统计方法 ============
@@ -291,6 +311,16 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
     }
     
     public byte[] execute(byte[] command, MessageContext msgCtx) {
+        
+        // ============ 新增：消息大小和到达率统计 ============
+        // 统计消息字节大小
+        int messageSize = command.length;
+        timeBasedTotalSize.addAndGet(messageSize);
+        timeBasedSizeSamples.incrementAndGet();
+        
+        // 统计到达率（每次 execute 调用都代表 Server 收到并处理了一个请求）
+        timeBasedArrivalCount.incrementAndGet();
+        // =================================================
         
         ByteBuffer buffer = ByteBuffer.wrap(command);
         int l = buffer.getInt();

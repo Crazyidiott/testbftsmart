@@ -114,6 +114,12 @@ public class RLAgentConnector {
                 // Convert to microseconds for the agent (matches scaling factor of 100,000 in trainer.py)
                 double avgLatencyUs = avgLatencyNs / 1000.0;
 
+                // 新增：计算平均消息大小（字节）
+                double avgMessageSize = snapshot.sizeSamples > 0 ? (double) snapshot.totalSize / snapshot.sizeSamples : 0;
+
+                // 新增：计算到达率（请求/秒）
+                double arrivalRate = (double) snapshot.arrivalCount * 1000.0 / snapshot.timeWindow;
+
                 // Memory monitoring
                 Runtime runtime = Runtime.getRuntime();
                 long usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024); // MB
@@ -121,20 +127,20 @@ public class RLAgentConnector {
                 long totalMemory = runtime.totalMemory() / (1024 * 1024); // MB
                 double memoryUsagePercent = (double) usedMemory / maxMemory * 100;
 
-                // Debug logging with memory info
-                logger.info(String.format("[Metrics] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us | Memory: %dMB/%dMB (%.1f%%)",
+                // Debug logging with memory info (updated with new metrics)
+                logger.info(String.format("[Metrics] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us | avgSize=%.0f bytes, arrivalRate=%.2f req/s | Memory: %dMB/%dMB (%.1f%%)",
                     snapshot.timeWindow, snapshot.ops, snapshot.latencySum, snapshot.latencySamples,
-                    throughput, avgLatencyUs, usedMemory, maxMemory, memoryUsagePercent));
+                    throughput, avgLatencyUs, avgMessageSize, arrivalRate, usedMemory, maxMemory, memoryUsagePercent));
 
-                // 2. Build Request
+                // 2. Build Request (updated with size and arrival_rate)
                 MonitorProto.MetricsRequest request = MonitorProto.MetricsRequest.newBuilder()
                         .setThroughput((int) throughput)
                         .setLatency((int) avgLatencyUs) 
-                        .setSize(0) // Not currently tracking size individually here
+                        .setSize((int) avgMessageSize) // 新增：平均消息大小（字节）
                         .setTotThr((int) throughput) // Simplified mapping
                         .setTotLat((int) avgLatencyUs) 
                         .setOption(1) // Option 1 for Batch Tuning
-                        .setArrivalRate(0.0)
+                        .setArrivalRate(arrivalRate) // 新增：到达率（请求/秒）
                         .build();
 
                 // 3. Send RPC
