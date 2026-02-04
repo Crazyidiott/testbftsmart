@@ -327,7 +327,17 @@ client_host=${NODES[4]}
 # The last argument is CLIENT_RATE_PER_THREAD
 ssh -i "$KEY" "$USER@$client_host" "
     cd ${REMOTE_PROJECT_PATH}
-    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
+    if [ -n \"${WORKLOAD_CONFIG_NAME}\" ]; then
+        WORKLOAD_ARGS=\"config/workloads/${WORKLOAD_CONFIG_NAME}\"
+        
+        # Use new Dynamic Client logic if workload config exists
+        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncDynamicClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} \${WORKLOAD_ARGS} > client.log 2>&1 &
+        echo "    [Info] Using AsyncDynamicClient with config: \${WORKLOAD_CONFIG_NAME}"
+    else
+        # Fallback to original Client logic
+        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
+        echo "    [Info] Using Standard AsyncLatencyClient"
+    fi
 "
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
     # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 true false true > client.log 2>&1 &
