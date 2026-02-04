@@ -931,7 +931,7 @@ class PPO(nn.Module, OptimizerBase):
 
     def make_batch(self):
         s_lst, a_lst, b_lst, c_lst, r_lst, s_prime_lst = [], [], [], [], [], []
-        prob_a_lst, prob_b_lst, prob_c_lst = [], [], [], []
+        prob_a_lst, prob_b_lst, prob_c_lst = [], [], []
 
         for transition in self.data:
             s, a, b, c, r, s_prime, p_a, p_b, p_c = transition
