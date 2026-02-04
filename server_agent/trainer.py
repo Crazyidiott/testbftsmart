@@ -376,7 +376,7 @@ class BayesianOptimizer(OptimizerBase):
         self.min_exploration_weight = 0.1 
         
         # ============ 3. 滑动窗口配置 ============
-        self.window_size = 50  # 减小窗口大小，避免 GP 拟合时间过长
+        self.window_size = 200  # 减小窗口大小，避免 GP 拟合时间过长
         
         # 历史数据
         self.X_history = []
