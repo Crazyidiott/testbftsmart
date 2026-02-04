@@ -179,7 +179,7 @@ for i in "${!NODES[@]}"; do
         rm -rf testbftsmart/config/currentView*
         
         echo "    [Cleanup] Removing old ML model files..."
-        rm -f testbftsmart/server_agent/bo_model.pkl
+        # rm -f testbftsmart/server_agent/bo_model.pkl
         rm -f testbftsmart/server_agent/ppo_model.pth
         
         # --- Verification Step ---
@@ -359,8 +359,8 @@ if [ $COUNT -ge $MAX_RETRIES ]; then
     ssh -i "$KEY" "$USER@$client_host" "pkill -f AsyncLatencyClient"
 fi
 
-# COMMENTED OUT STEP 5 FOR STABLE BENCHMARKING
-# echo ">>> [Step 5] Triggering View Change (Killing Node 0)..."
+# COMMENTED OUT STEP 4.5 view change FOR STABLE BENCHMARKING
+# echo ">>> [Step 4.5] Triggering View Change (Killing Node 0)..."
 # node0_host=${NODES[0]}
 
 # ssh -i "$KEY" "$USER@$node0_host" "pkill -f 'CounterServer 0'"
@@ -370,6 +370,28 @@ fi
 
 # echo "    Waiting 60 seconds for View Change to complete..."
 # sleep 60
+
+# Wait a bit for final metrics to be written, then stop servers
+echo ">>> [Step 5] Stopping Servers..."
+echo "    Waiting 10 seconds for servers to flush logs..."
+sleep 10
+
+for i in {0..3}; do
+    host=${NODES[$i]}
+    echo "    Stopping processes on Node $i..."
+    ssh -i "$KEY" "$USER@$host" "
+        # Kill Java processes (Server) - same logic as cleanup at start
+        ps -ef | grep 'java' | grep 'bftsmart' | grep -v 'grep' | grep -v 'bash -c' | awk '{print \\\$2}' | xargs -r kill -9
+        
+        # Kill wrapper scripts (smartrun.sh)
+        ps -ef | grep 'smartrun.sh' | grep -v 'grep' | grep -v 'bash -c' | awk '{print \\\$2}' | xargs -r kill -9
+        
+        # Kill RL agents
+        ps -ef | grep 'python3.*trainer.py\\|python3.*mock_agent.py' | grep -v 'grep' | grep -v 'bash' | awk '{print \\\$2}' | xargs -r kill -9
+    " 2>/dev/null || true
+done
+
+echo "    All servers and agents stopped."
 
 echo ">>> [Step 6] Collecting Results..."
 mkdir -p results
