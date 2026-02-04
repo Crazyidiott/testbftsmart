@@ -40,6 +40,12 @@ if [ -n "$5" ]; then
 else
     ALG_NAME="BAYESIAN"  # Default algorithm
 fi
+
+if [ -n "$6" ]; then
+    WORKLOAD_CONFIG_NAME=$6
+else
+    WORKLOAD_CONFIG_NAME=""
+fi
 # Supported algorithms:
 #   NONE     - No agent at all, uses system.config parameters directly (pure BFT-SMaRt)
 #   STATIC   - Fixed parameters (uses BatchSize and Timeout from script arguments, with metrics)
@@ -332,7 +338,7 @@ ssh -i "$KEY" "$USER@$client_host" "
         
         # Use new Dynamic Client logic if workload config exists
         nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncDynamicClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} \${WORKLOAD_ARGS} > client.log 2>&1 &
-        echo "    [Info] Using AsyncDynamicClient with config: \${WORKLOAD_CONFIG_NAME}"
+        echo "    [Info] Using AsyncDynamicClient with config: ${WORKLOAD_CONFIG_NAME}"
     else
         # Fallback to original Client logic
         nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
@@ -351,10 +357,17 @@ MAX_RETRIES=500 # 500 * 3s = ~1500s max
 COUNT=0
 client_host=${NODES[4]}
 
+if [ -n "${WORKLOAD_CONFIG_NAME}" ]; then
+    CLIENT_PROCESS_NAME="AsyncDynamicClient"
+else
+    CLIENT_PROCESS_NAME="AsyncLatencyClient"
+fi
+
 while [ $COUNT -lt $MAX_RETRIES ]; do
     sleep 3
-    # Check if AsyncLatencyClient is running
-    if ssh -i "$KEY" "$USER@$client_host" "pgrep -f AsyncLatencyClient" > /dev/null 2>&1; then
+    # Check if Client is running
+    # 使用 CLIENT_PROCESS_NAME 变量来动态检查是哪种客户端
+    if ssh -i "$KEY" "$USER@$client_host" "pgrep -f ${CLIENT_PROCESS_NAME}" > /dev/null 2>&1; then
         echo -n "."
         ((COUNT++))
     else
@@ -366,7 +379,7 @@ done
 
 if [ $COUNT -ge $MAX_RETRIES ]; then
     echo "    WARNING: Client timed out (running longer than 120s). Force killing..."
-    ssh -i "$KEY" "$USER@$client_host" "pkill -f AsyncLatencyClient"
+    ssh -i "$KEY" "$USER@$client_host" "pkill -f ${CLIENT_PROCESS_NAME}"
 fi
 
 # COMMENTED OUT STEP 4.5 view change FOR STABLE BENCHMARKING
