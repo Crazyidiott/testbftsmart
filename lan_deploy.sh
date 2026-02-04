@@ -308,8 +308,10 @@ for i in {0..3}; do
     "
 
     # Then start the Java Server
+    # Set ENABLE_GC_LOG=true to generate GC logs (gc_0.log, gc_1.log, etc.)
     ssh -i "$KEY" "$USER@$host" "
         cd ${REMOTE_PROJECT_PATH}
+        export ENABLE_GC_LOG=${ENABLE_GC_LOG:-false}
         nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyServer $i 1000 1024 1024 false nosig 0 > server_$i.log 2>&1 &
     "
         # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterServer $i > server_$i.log 2>&1 &
@@ -325,7 +327,7 @@ client_host=${NODES[4]}
 # The last argument is CLIENT_RATE_PER_THREAD
 ssh -i "$KEY" "$USER@$client_host" "
     cd ${REMOTE_PROJECT_PATH}
-    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 800000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
+    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
 "
     # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterClient 1001 1 100000 > client.log 2>&1 &
     # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyClient 1001 1 1000 1024 true false true > client.log 2>&1 &
@@ -335,7 +337,7 @@ echo "    Client started."
 
 # Replace fixed sleep with dynamic wait
 echo "    Waiting for Client to finish..."
-MAX_RETRIES=100 # 40 * 3s = ~120s max
+MAX_RETRIES=500 # 500 * 3s = ~1500s max
 COUNT=0
 client_host=${NODES[4]}
 
@@ -377,6 +379,9 @@ for i in {0..3}; do
     scp -i "$KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_$i.log" "./results/server_$i.log"
     # Added agent logs and experiments data collection
     scp -i "$KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_agent/agent_$i.log" "./results/agent_$i.log"
+    
+    # Fetch GC logs if they exist (optional, generated when ENABLE_GC_LOG=true)
+    scp -i "$KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/gc_$i.log" "./results/gc_$i.log" 2>/dev/null || true
     
     # Create local directory for experiments data
     mkdir -p "./results/node_$i_experiments"

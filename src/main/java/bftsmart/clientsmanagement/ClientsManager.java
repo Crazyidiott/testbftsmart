@@ -333,10 +333,18 @@ public class ClientsManager {
 
         /* ################################################ */
         //pjsousa: simple flow control mechanism to avoid out of memory exception
-        if (fromClient && (controller.getStaticConf().getUseControlFlow() != 0)) {
-            if (clientData.getPendingRequests().size() > controller.getStaticConf().getUseControlFlow()) {
+        //Modified: Apply flow control to BOTH client requests AND forwarded requests to prevent OOM
+        if (controller.getStaticConf().getUseControlFlow() != 0) {
+            int pendingSize = clientData.getPendingRequests().size();
+            int flowControlLimit = controller.getStaticConf().getUseControlFlow();
+            
+            // Use a higher limit for forwarded requests (2x the normal limit)
+            int effectiveLimit = fromClient ? flowControlLimit : flowControlLimit * 2;
+            
+            if (pendingSize > effectiveLimit) {
                 //clients should not have more than defined in the config file
                 //outstanding messages, otherwise they will be dropped.
+                
                 //just account for the message reception //why is this necessary?
                 //Scenario: A faulty client sends its request to the leader first which will discard the message due to a full queue.
                 //          Then the client sends the message delayed (queue is now not full) to the followers, which will forward the message to the leader after the timeout.
@@ -344,12 +352,15 @@ public class ClientsManager {
                 //clientData.setLastMessageReceived(request.getSequence());
                 //clientData.setLastMessageReceivedTime(request.receptionTime);
 
+
                 clientData.clientLock.unlock();
-                // A faulty clients spams too many requests
+                String source = fromClient ? "client" : "forwarded";
                 if (!thisReplicaWasRecovered()) {
-                    logger.warn("Client message from " + request.getSender() + " dropped due to flow control mechanism");
+                    logger.warn("Request from {} ({}) dropped due to flow control (pending={}, limit={})", 
+                        request.getSender(), source, pendingSize, effectiveLimit);
                 } else {
-                    logger.debug("Client message from " + request.getSender() + " dropped due to flow control mechanism");
+                    logger.debug("Request from {} ({}) dropped due to flow control (pending={}, limit={})", 
+                        request.getSender(), source, pendingSize, effectiveLimit);
                 }
                 return false;
             }

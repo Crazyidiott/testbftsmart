@@ -12,4 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-java -Djava.security.properties="./config/java.security" -Dlogback.configurationFile="./config/logback.xml" -cp "lib/*" $@
+# JVM Memory Settings
+# -Xmx4g: Maximum heap size 4GB
+# -Xms2g: Initial heap size 2GB
+JAVA_OPTS="-Xmx4g -Xms2g"
+
+# GC Logging (optional, enable by setting ENABLE_GC_LOG=true)
+# GC logs will be written to gc_<processid>.log in the working directory
+ENABLE_GC_LOG="${ENABLE_GC_LOG:-false}"
+
+if [ "$ENABLE_GC_LOG" = "true" ]; then
+    # Extract server ID from arguments (for ThroughputLatencyServer, it's the 2nd argument after class name)
+    # Example: smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyServer 0 1000 ...
+    #                      $1                                                    $2
+    SERVER_ID="${2:-$$}"  # Use PID as fallback if no server ID
+    
+    # Java 8/11 compatible GC logging
+    GC_OPTS="-Xlog:gc*:file=gc_${SERVER_ID}.log:time,uptime,level,tags"
+    
+    JAVA_OPTS="$JAVA_OPTS $GC_OPTS"
+    echo "GC logging enabled: gc_${SERVER_ID}.log"
+fi
+
+java $JAVA_OPTS -Djava.security.properties="./config/java.security" -Dlogback.configurationFile="./config/logback.xml" -cp "lib/*" $@
