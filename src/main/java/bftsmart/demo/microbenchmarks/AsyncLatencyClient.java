@@ -57,6 +57,13 @@ public class AsyncLatencyClient {
     // Global counter for total throughput monitoring
     static AtomicLong globalOpsCounter = new AtomicLong(0);
     
+    // ============ 有效发送统计（排除重传） ============
+    // 首次发送的请求数（不含重传）
+    static AtomicLong totalSentRequests = new AtomicLong(0);
+    // 实验开始时间
+    static long clientExperimentStartTime = 0;
+    // ================================================
+    
     public static void main(String[] args) throws IOException {
         if (args.length < 8) {
             System.out.println("Usage: ... ThroughputLatencyClient <initial client id> <number of clients> <number of operations> <request size> <interval (ms)> <read only?> <verbose?> <nosig | default | ecdsa> [target_rate_per_client]");
@@ -135,6 +142,21 @@ public class AsyncLatencyClient {
     
         exec.shutdown();
         
+        // ============ 输出有效发送统计 ============
+        long totalSent = totalSentRequests.get();
+        long durationMs = System.currentTimeMillis() - clientExperimentStartTime;
+        double durationSec = durationMs / 1000.0;
+        double avgRate = durationSec > 0 ? totalSent / durationSec : 0;
+        
+        System.out.println("========================================");
+        System.out.println("[Client Workload] FINAL STATISTICS");
+        System.out.println("========================================");
+        System.out.println("[Client Workload] Total requests sent (excluding retransmissions): " + totalSent);
+        System.out.println("[Client Workload] Experiment duration: " + String.format("%.2f", durationSec) + " seconds");
+        System.out.println("[Client Workload] Average send rate: " + String.format("%.2f", avgRate) + " ops/sec");
+        System.out.println("========================================");
+        // ==========================================
+
         System.out.println("All clients done.");
 
     }
@@ -221,6 +243,14 @@ public class AsyncLatencyClient {
                 if (this.verbose) System.out.println("Executing experiment for " + this.numberOfOps + " ops");
 
                 long startExperimentTime = System.nanoTime();
+                
+                // 记录全局实验开始时间（只设置一次）
+                synchronized (AsyncLatencyClient.class) {
+                    if (AsyncLatencyClient.clientExperimentStartTime == 0) {
+                        AsyncLatencyClient.clientExperimentStartTime = System.currentTimeMillis();
+                        System.out.println("[Client Workload] Experiment started at " + AsyncLatencyClient.clientExperimentStartTime);
+                    }
+                }
 
                 for (int i = 0; i < this.numberOfOps; i++) {
                     
@@ -243,6 +273,10 @@ public class AsyncLatencyClient {
                         }
                     }
                     // ---------------------------
+
+                    // ============ 统计有效发送（首次发送，不含重传） ============
+                    AsyncLatencyClient.totalSentRequests.incrementAndGet();
+                    // ==========================================================
 
                     long last_send_instant = System.nanoTime();
                     this.serviceProxy.invokeAsynchRequest(this.request, new ReplyListener() {

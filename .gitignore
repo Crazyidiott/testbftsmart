@@ -14,3 +14,5 @@ build
 
 py-resdb
 .venv
+results*
+benchmark_results*

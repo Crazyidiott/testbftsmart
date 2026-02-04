@@ -80,6 +80,13 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
     private AtomicLong timeBasedTotalLatency = new AtomicLong(0);
     private AtomicLong timeBasedLatSamples = new AtomicLong(0);
 
+    // ============ Goodput 统计器 ============
+    // 总处理消息数（不含重复，用于计算 Goodput）
+    private AtomicLong totalGoodputOps = new AtomicLong(0);
+    // 实验开始时间
+    private long experimentStartTime = 0;
+    // ========================================
+
     // RL Connector
     private RLAgentConnector rlConnector;
     private Thread rlThread;
@@ -113,6 +120,42 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
 
         return new MetricsSnapshot(ops, latSum, latSamp, window);
     }
+
+    // ============ Goodput 统计方法 ============
+    /**
+     * 获取当前 Goodput 统计
+     * @return 总处理请求数
+     */
+    public long getTotalGoodput() {
+        return totalGoodputOps.get();
+    }
+
+    /**
+     * 获取实验运行时间（毫秒）
+     */
+    public long getExperimentDurationMs() {
+        if (experimentStartTime == 0) return 0;
+        return System.currentTimeMillis() - experimentStartTime;
+    }
+
+    /**
+     * 打印最终 Goodput 统计
+     */
+    public void printFinalGoodputStats() {
+        long totalOps = totalGoodputOps.get();
+        long durationMs = getExperimentDurationMs();
+        double durationSec = durationMs / 1000.0;
+        double avgThroughput = durationSec > 0 ? totalOps / durationSec : 0;
+
+        System.out.println("========================================");
+        System.out.println("[Goodput] FINAL STATISTICS");
+        System.out.println("========================================");
+        System.out.println("[Goodput] Total requests processed: " + totalOps);
+        System.out.println("[Goodput] Experiment duration: " + durationSec + " seconds");
+        System.out.println("[Goodput] Average throughput: " + String.format("%.2f", avgThroughput) + " ops/sec");
+        System.out.println("========================================");
+    }
+    // ==========================================
 
     public ThroughputLatencyServer(int id, int interval, int replySize, int stateSize, boolean context,  int signed, int write) {
 
@@ -299,6 +342,20 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         
         iterations++;
         timeBasedOpsCount.incrementAndGet();
+        
+        // ============ Goodput 统计 ============
+        long currentGoodput = totalGoodputOps.incrementAndGet();
+        // 记录实验开始时间（第一个请求到达时）
+        if (currentGoodput == 1) {
+            experimentStartTime = System.currentTimeMillis();
+            System.out.println("[Goodput] Experiment started at " + experimentStartTime);
+        }
+        // 每 10000 个请求输出一次进度
+        if (currentGoodput % 10000 == 0) {
+            long elapsedSec = (System.currentTimeMillis() - experimentStartTime) / 1000;
+            System.out.println("[Goodput] Processed " + currentGoodput + " requests in " + elapsedSec + " seconds");
+        }
+        // ======================================
 
         if (msgCtx != null && msgCtx.getFirstInBatch() != null) {
             
@@ -415,7 +472,13 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         if (!write.equalsIgnoreCase("")) w++;
         if (write.equalsIgnoreCase("rwd")) w++;
 
-        new ThroughputLatencyServer(processId,interval,replySize, stateSize, context, s, w);        
+        ThroughputLatencyServer server = new ThroughputLatencyServer(processId,interval,replySize, stateSize, context, s, w);
+        
+        // 添加 shutdown hook，在程序退出时输出 Goodput 统计
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("\n[Shutdown] Server shutting down...");
+            server.printFinalGoodputStats();
+        }));
     }
 
     @Override
