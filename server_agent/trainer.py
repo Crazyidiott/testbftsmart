@@ -903,7 +903,8 @@ class PPO(nn.Module, OptimizerBase):
         
         self.data = []
 
-        input_dims = 6
+        # 输入维度: [throughput, latency, size, tot_thr, tot_lat, tot_size, arrival_rate]
+        input_dims = 7  # 修复：从 6 改为 7，匹配新增的 size 和 arrival_rate
         hidden_dims = 64
 
         self.fc1 = nn.Linear(input_dims, hidden_dims)
