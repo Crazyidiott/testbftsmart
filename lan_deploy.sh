@@ -186,7 +186,7 @@ for i in "${!NODES[@]}"; do
         
         echo "    [Cleanup] Removing old ML model files..."
         # rm -f testbftsmart/server_agent/bo_model.pkl
-        rm -f testbftsmart/server_agent/ppo_model.pth
+        # rm -f testbftsmart/server_agent/ppo_model.pth
         
         # --- Verification Step ---
         echo "    [Verify] Checking for remaining processes..."
