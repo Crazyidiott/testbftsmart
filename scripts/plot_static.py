@@ -37,13 +37,33 @@ def make_score(df, weights):
     Compute weighted score from throughput and latency.
     - throughput: higher is better
     - latency: lower is better
+    - Failed experiments (throughput=0 or latency=0) get NaN score
     """
+    # Mark failed experiments (throughput <= 0 or latency <= 0) as NaN
+    thr = df['avg_throughput'].astype(float)
+    lat = df['avg_latency_us'].astype(float)
+    failed_mask = (thr <= 0) | (lat <= 0)
+    
+    # Only normalize on valid (non-failed) data
+    valid_df = df[~failed_mask]
+    
+    if valid_df.empty:
+        # All experiments failed
+        return pd.Series(np.nan, index=df.index)
+    
     comps = {}
     if weights.get('throughput', 0) > 0:
-        comps['throughput'] = normalize_series(df['avg_throughput'].astype(float), higher_is_better=True)
+        # Normalize only valid values
+        norm_thr = normalize_series(valid_df['avg_throughput'].astype(float), higher_is_better=True)
+        full_thr = pd.Series(np.nan, index=df.index)
+        full_thr.loc[norm_thr.index] = norm_thr
+        comps['throughput'] = full_thr
     if weights.get('latency', 0) > 0:
         # lower latency is better
-        comps['latency'] = normalize_series(df['avg_latency_us'].astype(float), higher_is_better=False)
+        norm_lat = normalize_series(valid_df['avg_latency_us'].astype(float), higher_is_better=False)
+        full_lat = pd.Series(np.nan, index=df.index)
+        full_lat.loc[norm_lat.index] = norm_lat
+        comps['latency'] = full_lat
 
     # Weighted sum
     score = pd.Series(0.0, index=df.index)
@@ -56,16 +76,33 @@ def make_score(df, weights):
     if total_w > 0:
         score = score / total_w
 
+    # Set failed experiments to NaN (will show as distinct color in heatmap)
+    score[failed_mask] = np.nan
+
     return score
 
 
 def plot_heatmap(grid_df, xs, ys, title, outpath, cmap='viridis'):
     plt.figure(figsize=(10, 8))
+    # Create a masked array for NaN values (failed experiments)
+    # NaN cells will be shown in gray
+    mask = grid_df.isna()
+    
     # seaborn expects rows=y, cols=x
-    ax = sns.heatmap(grid_df, xticklabels=xs, yticklabels=ys, cmap=cmap, cbar_kws={'label': 'score'})
+    ax = sns.heatmap(grid_df, xticklabels=xs, yticklabels=ys, cmap=cmap, 
+                     cbar_kws={'label': 'score'}, mask=mask,
+                     vmin=0, vmax=1)  # Fixed scale 0-1 for normalized scores
+    
+    # Fill NaN cells with gray color to indicate failed experiments
+    for i in range(len(ys)):
+        for j in range(len(xs)):
+            if mask.iloc[i, j]:
+                ax.add_patch(plt.Rectangle((j, i), 1, 1, fill=True, 
+                            facecolor='lightgray', edgecolor='white', lw=0.5))
+    
     ax.set_xlabel('batch_size')
     ax.set_ylabel('batch_timeout')
-    ax.set_title(title)
+    ax.set_title(title + '\n(gray = failed experiment)')
     plt.tight_layout()
     plt.savefig(outpath)
     plt.close()
