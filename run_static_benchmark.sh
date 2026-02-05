@@ -14,6 +14,10 @@
 #     ./run_static_benchmark.sh                    # 首次运行（需要编译）
 #     ./run_static_benchmark.sh true               # 跳过编译（加快测试）
 #     ./run_static_benchmark.sh true experiment_20260205_143000  # 从中断处续跑
+#     ./run_static_benchmark.sh true <EXPERIMENT_DIR> <KEY>（格式：rate_size_bs_bt）重跑特定实验并在原结果中覆盖（必须是在续跑模式下）
+
+# 示例：
+./run_static_benchmark.sh true experiment_20260205_150000 5000_128_100_50
 #
 # 输出：
 #   - static_benchmark_results/results.csv   : 汇总结果表格
@@ -41,6 +45,14 @@ SKIP_BUILD="${1:-false}"
 
 # 断点续跑：指定之前的实验目录名（如 experiment_20260205_143000）
 RESUME_DIR="${2:-}"
+
+# 强制重跑某个特定的配置 (可选)
+# 格式: rate_size_bs_bt，例如: "5000_128_100_50"
+# 如果指定了此参数，脚本将：
+#   1. 从 results.csv 中删除该配置的历史数据
+#   2. 从 progress.txt 中删除该配置的记录
+#   3. 重新运行该实验
+FORCE_RERUN_KEY="${3:-}"
 
 # 每个配置的运行时间（秒）- 与 dynamic_workload.config 保持一致
 RUN_DURATION=30
@@ -72,6 +84,31 @@ TEMP_WORKLOAD_CONFIG="config/workloads/temp_static_workload.config"
 
 # 进度文件（记录已完成的实验）
 PROGRESS_FILE="${EXPERIMENT_DIR}/progress.txt"
+
+# 如果指定了强制重跑
+if [[ -n "$FORCE_RERUN_KEY" ]] && [[ "$RESUME_MODE" == true ]]; then
+    echo ">>> FORCE RERUN MODE: Clearing history for ${FORCE_RERUN_KEY}"
+    
+    # 1. 从 progress.txt 中删除
+    if [[ -f "$PROGRESS_FILE" ]]; then
+        sed -i "/^${FORCE_RERUN_KEY}$/d" "$PROGRESS_FILE"
+        echo "    Removed from progress.txt"
+    fi
+    
+    # 2. 从 results.csv 中删除
+    # parse key: rate_size_bs_bt
+    IFS='_' read -r rr rs rbs rbt <<< "$FORCE_RERUN_KEY"
+    CSV_FILE="${EXPERIMENT_DIR}/results.csv"
+    
+    if [[ -f "$CSV_FILE" ]]; then
+        # CSV 列：workload_id, rate, request_size, batch_size, batch_timeout, ...
+        # 我们用 awk 过滤掉匹配的行并写回临时文件
+        # 注意：这里需要精确匹配 rate, request_size, batch_size, batch_timeout
+        awk -F, -v r="$rr" -v s="$rs" -v bs="$rbs" -v bt="$rbt" \
+        '$2!=r || $3!=s || $4!=bs || $5!=bt' "$CSV_FILE" > "${CSV_FILE}.tmp" && mv "${CSV_FILE}.tmp" "$CSV_FILE"
+        echo "    Removed old results from results.csv"
+    fi
+fi
 
 # ============= 辅助函数 =============
 
@@ -315,7 +352,10 @@ for key in "${!UNIQUE_WORKLOADS[@]}"; do
             # lan_deploy.sh [BatchSize] [Timeout] [ClientRate] [SkipBuild] [ALGORITHM] [WORKLOAD_CONFIG]
             echo "  Running lan_deploy.sh..."
             
-            ./lan_deploy.sh "$bs" "$bt" -1 "$SKIP_BUILD" "STATIC" "temp_static_workload.config" > "${EXPERIMENT_DIR}/logs/exp_${EXPERIMENT_COUNT}.log" 2>&1 || {
+            # 日志文件命名：统一使用 workload_bs_bt 格式方便查找
+            LOG_PREFIX="w${WORKLOAD_ID}_bs${bs}_bt${bt}"
+            
+            ./lan_deploy.sh "$bs" "$bt" -1 "$SKIP_BUILD" "STATIC" "temp_static_workload.config" > "${EXPERIMENT_DIR}/logs/deploy_${LOG_PREFIX}.log" 2>&1 || {
                 echo "  WARNING: lan_deploy.sh failed for this experiment"
                 echo "${WORKLOAD_ID},${rate},${request_size},${bs},${bt},0,0,0,0,0,0,0,0" >> "$RESULTS_CSV"
                 # 即使失败也标记为完成，避免重复尝试失败的实验
@@ -326,7 +366,7 @@ for key in "${!UNIQUE_WORKLOADS[@]}"; do
             # 解析 server log (RLAgentConnector 的 metrics 输出在 server_*.log 中)
             # 使用 node 0 的日志作为主要数据源
             SERVER_LOG="results/server_0.log"
-            METRICS_TMP="${EXPERIMENT_DIR}/logs/metrics_${EXPERIMENT_COUNT}.tmp"
+            METRICS_TMP="${EXPERIMENT_DIR}/logs/metrics_${LOG_PREFIX}.tmp"
             
             echo "  Parsing metrics from ${SERVER_LOG}..."
             parse_agent_log "$SERVER_LOG" "$METRICS_TMP"
@@ -341,10 +381,11 @@ for key in "${!UNIQUE_WORKLOADS[@]}"; do
                 echo "${WORKLOAD_ID},${rate},${request_size},${bs},${bt},0,0,0,0,0,0,0,0" >> "$RESULTS_CSV"
             fi
             
-            # 保存原始日志副本 (server log + agent log + deploy log)
-            cp "results/server_0.log" "${EXPERIMENT_DIR}/logs/server_w${WORKLOAD_ID}_bs${bs}_bt${bt}.log" 2>/dev/null || true
-            cp "results/agent_0.log" "${EXPERIMENT_DIR}/logs/agent_w${WORKLOAD_ID}_bs${bs}_bt${bt}.log" 2>/dev/null || true
-            cp "results/client.log" "${EXPERIMENT_DIR}/logs/client_w${WORKLOAD_ID}_bs${bs}_bt${bt}.log" 2>/dev/null || true
+            # 保存原始日志副本 (server log + agent log + client log)
+            # 统一命名格式：{type}_w{workload}_bs{batch_size}_bt{batch_timeout}.log
+            cp "results/server_0.log" "${EXPERIMENT_DIR}/logs/server_${LOG_PREFIX}.log" 2>/dev/null || true
+            cp "results/agent_0.log" "${EXPERIMENT_DIR}/logs/agent_${LOG_PREFIX}.log" 2>/dev/null || true
+            cp "results/client.log" "${EXPERIMENT_DIR}/logs/client_${LOG_PREFIX}.log" 2>/dev/null || true
             
             # 标记实验完成（用于断点续跑）
             mark_experiment_done "$WORKLOAD_KEY" "$bs" "$bt"
