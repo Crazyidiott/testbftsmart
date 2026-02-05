@@ -9,10 +9,11 @@
 #   测量每个组合的静态性能表现。
 #
 # 使用方式：
-#   ./run_static_benchmark.sh [SkipBuild]
+#   ./run_static_benchmark.sh [SkipBuild] [ResumeDir]
 #   例如：
-#     ./run_static_benchmark.sh          # 首次运行（需要编译）
-#     ./run_static_benchmark.sh true     # 跳过编译（加快测试）
+#     ./run_static_benchmark.sh                    # 首次运行（需要编译）
+#     ./run_static_benchmark.sh true               # 跳过编译（加快测试）
+#     ./run_static_benchmark.sh true experiment_20260205_143000  # 从中断处续跑
 #
 # 输出：
 #   - static_benchmark_results/results.csv   : 汇总结果表格
@@ -38,18 +39,64 @@ BATCH_TIMEOUT_STEP=30
 # 是否跳过编译
 SKIP_BUILD="${1:-false}"
 
+# 断点续跑：指定之前的实验目录名（如 experiment_20260205_143000）
+RESUME_DIR="${2:-}"
+
 # 每个配置的运行时间（秒）- 与 dynamic_workload.config 保持一致
 RUN_DURATION=30
 
 # 结果目录
 RESULTS_DIR="static_benchmark_results"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-EXPERIMENT_DIR="${RESULTS_DIR}/experiment_${TIMESTAMP}"
+
+# 判断是否续跑
+if [[ -n "$RESUME_DIR" ]]; then
+    # 续跑模式
+    EXPERIMENT_DIR="${RESULTS_DIR}/${RESUME_DIR}"
+    if [[ ! -d "$EXPERIMENT_DIR" ]]; then
+        echo "ERROR: Resume directory not found: ${EXPERIMENT_DIR}"
+        echo "Available experiment directories:"
+        ls -d ${RESULTS_DIR}/experiment_* 2>/dev/null || echo "  (none)"
+        exit 1
+    fi
+    RESUME_MODE=true
+    echo ">>> RESUME MODE: Continuing from ${EXPERIMENT_DIR}"
+else
+    # 新实验模式
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    EXPERIMENT_DIR="${RESULTS_DIR}/experiment_${TIMESTAMP}"
+    RESUME_MODE=false
+fi
 
 # 临时 workload 配置文件
 TEMP_WORKLOAD_CONFIG="config/workloads/temp_static_workload.config"
 
+# 进度文件（记录已完成的实验）
+PROGRESS_FILE="${EXPERIMENT_DIR}/progress.txt"
+
 # ============= 辅助函数 =============
+
+# 检查某个实验是否已完成
+is_experiment_done() {
+    local workload_key=$1
+    local bs=$2
+    local bt=$3
+    local exp_key="${workload_key}_${bs}_${bt}"
+    
+    if [[ -f "$PROGRESS_FILE" ]] && grep -q "^${exp_key}$" "$PROGRESS_FILE" 2>/dev/null; then
+        return 0  # 已完成
+    fi
+    return 1  # 未完成
+}
+
+# 标记实验完成
+mark_experiment_done() {
+    local workload_key=$1
+    local bs=$2
+    local bt=$3
+    local exp_key="${workload_key}_${bs}_${bt}"
+    
+    echo "$exp_key" >> "$PROGRESS_FILE"
+}
 
 # 创建单一 workload 的临时配置文件
 create_single_workload_config() {
@@ -143,17 +190,25 @@ EOF
 echo "============================================================"
 echo "          Static Benchmark Suite"
 echo "============================================================"
-echo "Timestamp: ${TIMESTAMP}"
 echo "Results will be saved to: ${EXPERIMENT_DIR}"
 echo "Skip Build: ${SKIP_BUILD}"
+echo "Resume Mode: ${RESUME_MODE}"
 echo ""
 
 # 创建结果目录
 mkdir -p "${EXPERIMENT_DIR}/logs"
 
-# 初始化结果 CSV
+# 初始化结果 CSV（仅在非续跑模式或文件不存在时）
 RESULTS_CSV="${EXPERIMENT_DIR}/results.csv"
-echo "workload_id,rate,request_size,batch_size,batch_timeout,avg_throughput,avg_latency_us,avg_msg_size_bytes,avg_arrival_rate,avg_mem_used_mb,avg_mem_max_mb,avg_mem_percent,sample_count" > "$RESULTS_CSV"
+if [[ "$RESUME_MODE" == false ]] || [[ ! -f "$RESULTS_CSV" ]]; then
+    echo "workload_id,rate,request_size,batch_size,batch_timeout,avg_throughput,avg_latency_us,avg_msg_size_bytes,avg_arrival_rate,avg_mem_used_mb,avg_mem_max_mb,avg_mem_percent,sample_count" > "$RESULTS_CSV"
+fi
+
+# 显示续跑进度（如果是续跑模式）
+if [[ "$RESUME_MODE" == true ]] && [[ -f "$PROGRESS_FILE" ]]; then
+    COMPLETED_COUNT=$(wc -l < "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    echo ">>> Resume mode: ${COMPLETED_COUNT} experiments already completed"
+fi
 
 # 读取 dynamic_workload.config 中的唯一 workload 模式
 WORKLOAD_CONFIG="config/workloads/dynamic_workload.config"
@@ -221,11 +276,15 @@ read -p "Press Enter to start, or Ctrl+C to abort..."
 
 # 主循环
 EXPERIMENT_COUNT=0
+SKIPPED_COUNT=0
 WORKLOAD_ID=0
 
 for key in "${!UNIQUE_WORKLOADS[@]}"; do
     IFS=',' read -r rate request_size <<< "${UNIQUE_WORKLOADS[$key]}"
     WORKLOAD_ID=$((WORKLOAD_ID + 1))
+    
+    # 用于断点续跑的 workload key
+    WORKLOAD_KEY="${rate}_${request_size}"
     
     echo ""
     echo "============================================================"
@@ -240,6 +299,13 @@ for key in "${!UNIQUE_WORKLOADS[@]}"; do
         for bt in "${BATCH_TIMEOUTS[@]}"; do
             EXPERIMENT_COUNT=$((EXPERIMENT_COUNT + 1))
             
+            # 检查是否已完成（断点续跑）
+            if is_experiment_done "$WORKLOAD_KEY" "$bs" "$bt"; then
+                SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
+                echo "  [SKIP] Experiment ${EXPERIMENT_COUNT}/${TOTAL_EXPERIMENTS}: already completed (bs=${bs}, bt=${bt})"
+                continue
+            fi
+            
             echo ""
             echo "--- Experiment ${EXPERIMENT_COUNT}/${TOTAL_EXPERIMENTS} ---"
             echo "  Workload: rate=${rate}, size=${request_size}"
@@ -252,6 +318,8 @@ for key in "${!UNIQUE_WORKLOADS[@]}"; do
             ./lan_deploy.sh "$bs" "$bt" -1 "$SKIP_BUILD" "STATIC" "temp_static_workload.config" > "${EXPERIMENT_DIR}/logs/exp_${EXPERIMENT_COUNT}.log" 2>&1 || {
                 echo "  WARNING: lan_deploy.sh failed for this experiment"
                 echo "${WORKLOAD_ID},${rate},${request_size},${bs},${bt},0,0,0,0,0,0,0,0" >> "$RESULTS_CSV"
+                # 即使失败也标记为完成，避免重复尝试失败的实验
+                mark_experiment_done "$WORKLOAD_KEY" "$bs" "$bt"
                 continue
             }
             
@@ -278,6 +346,9 @@ for key in "${!UNIQUE_WORKLOADS[@]}"; do
             cp "results/agent_0.log" "${EXPERIMENT_DIR}/logs/agent_w${WORKLOAD_ID}_bs${bs}_bt${bt}.log" 2>/dev/null || true
             cp "results/client.log" "${EXPERIMENT_DIR}/logs/client_w${WORKLOAD_ID}_bs${bs}_bt${bt}.log" 2>/dev/null || true
             
+            # 标记实验完成（用于断点续跑）
+            mark_experiment_done "$WORKLOAD_KEY" "$bs" "$bt"
+            
             # 第一次实验后跳过编译
             SKIP_BUILD="true"
             
@@ -294,7 +365,9 @@ echo "============================================================"
 echo "          Benchmark Complete!"
 echo "============================================================"
 echo "Results saved to: ${RESULTS_CSV}"
-echo "Total experiments run: ${EXPERIMENT_COUNT}"
+echo "Total experiments: ${EXPERIMENT_COUNT}"
+echo "Skipped (already done): ${SKIPPED_COUNT}"
+echo "Actually run: $((EXPERIMENT_COUNT - SKIPPED_COUNT))"
 echo ""
 
 # 生成简单的汇总统计
