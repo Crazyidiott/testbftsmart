@@ -175,7 +175,13 @@ try:
         for line in f:
             match = re.search(pattern, line)
             if match:
-                throughputs.append(float(match.group(1)))
+                thr_val = float(match.group(1))
+                # Only adding non-zero throughput samples (or checking arrival rate) can filter tail-end zeros
+                # 但这样可能会过滤掉真实的0吞吐（例如系统卡死）
+                # 更好的方法是去掉首尾的0，或者只保留中间段
+                
+                # 暂时先把所有解析出来存入列表，之后统一处理
+                throughputs.append(thr_val)
                 latencies.append(float(match.group(2)))
                 avg_sizes.append(float(match.group(3)))
                 arrival_rates.append(float(match.group(4)))
@@ -188,6 +194,25 @@ except Exception as e:
 # 计算平均值
 n = len(throughputs)
 if n > 0:
+    # 策略改进：
+    # 1. 跳过前5个样本（预热）
+    # 2. 从后往前扫描，去除结尾连续的 thr=0 的样本（冷却/Client停止）
+    
+    # 这里的逻辑是：只保留中间有效运行段
+    
+    # 去除由于 Client 停止导致的尾部 0 值
+    while len(throughputs) > 5 and throughputs[-1] == 0.0:
+         throughputs.pop()
+         latencies.pop()
+         avg_sizes.pop()
+         arrival_rates.pop()
+         mem_used.pop()
+         mem_max.pop()
+         mem_percent.pop()
+         
+    # 重新计算长度
+    n = len(throughputs)
+    
     # 跳过前5个样本（预热期）
     skip = min(5, n // 3)
     throughputs = throughputs[skip:]

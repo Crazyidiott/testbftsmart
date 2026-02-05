@@ -121,7 +121,8 @@ try:
         for line in f:
             match = re.search(pattern, line)
             if match:
-                throughputs.append(float(match.group(1)))
+                thr_val = float(match.group(1))
+                throughputs.append(thr_val)
                 latencies.append(float(match.group(2)))
                 avg_sizes.append(float(match.group(3)))
                 arrival_rates.append(float(match.group(4)))
@@ -133,6 +134,22 @@ except Exception as e:
 
 n = len(throughputs)
 if n > 0:
+    # 策略改进：
+    # 1. 跳过前10个样本（预热期）
+    # 2. 从后往前扫描，去除结尾连续的 thr=0 的样本（冷却/Client停止）
+    
+    # 去除由于 Client 停止导致的尾部 0 值
+    while len(throughputs) > 10 and throughputs[-1] == 0.0:
+         throughputs.pop()
+         latencies.pop()
+         avg_sizes.pop()
+         arrival_rates.pop()
+         mem_used.pop()
+         mem_max.pop()
+         mem_percent.pop()
+    
+    n = len(throughputs)
+
     # 跳过前10个样本（预热期，动态负载下预热更长）
     skip = min(10, n // 4)
     throughputs = throughputs[skip:]
