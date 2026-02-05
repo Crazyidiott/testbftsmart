@@ -22,7 +22,8 @@ Usage examples:
 
 Static heatmap:
 ```bash
-python3 scripts/plot_static.py static_benchmark_results/experiment_*/results.csv --weights 1.0,0.0,0.0,0.0
+# --weights throughput,latency (default 1.0,1.0)
+python3 scripts/plot_static.py static_benchmark_results/experiment_*/results.csv --weights 1.0,1.0
 ```
 
 Dynamic plots:
