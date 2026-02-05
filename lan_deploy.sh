@@ -434,6 +434,10 @@ for i in {0..3}; do
     # rsync -avz -e "ssh -i $KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_agent/experiments/" "./results/node_$i_experiments/"
 done
 
+
+echo "    Cleaning temporary files..."
+./cleanup_tmp_files.sh
+
 client_host=${NODES[4]}
 echo "    Fetching logs from Client..."
 scp -i "$KEY" "$USER@$client_host:${REMOTE_PROJECT_PATH}/client.log" "./results/client.log"
