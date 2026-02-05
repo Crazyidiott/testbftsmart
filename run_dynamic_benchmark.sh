@@ -48,8 +48,8 @@ SKIP_BUILD="${1:-false}"
 # 断点续跑：指定之前的实验目录名
 RESUME_DIR="${2:-}"
 
-# 动态负载配置文件
-WORKLOAD_CONFIG="dynamic_workload.config"
+# 动态负载配置文件（测试用）
+WORKLOAD_CONFIG="dynamic_workload_test.config"
 
 # 结果目录
 RESULTS_DIR="dynamic_benchmark_results"

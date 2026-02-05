@@ -89,11 +89,11 @@ def load_nodes_from_config(config_path=None):
         return {0: '127.0.0.1:45678', 1: '127.0.0.1:45678', 2: '127.0.0.1:45678', 3: '127.0.0.1:45678'}
 
 # PPO 超参数
-learning_rate = 0.0005
+learning_rate = 0.0003    # 降低学习率，更稳定
 gamma = 0.98
 lmbda = 0.95
 eps_clip = 0.1
-K_epoch = 3
+K_epoch = 5               # 增加训练轮数，更充分利用数据
 T_horizon = 20
 
 # ============= 动作空间配置 =============
@@ -371,9 +371,10 @@ class BayesianOptimizer(OptimizerBase):
         self.gp_n_restarts = 5 
         
         # ============ 2. 探索-利用参数 ============
-        self.exploration_weight = 2.0
-        self.exploration_decay = 0.98
-        self.min_exploration_weight = 0.1 
+        # 针对动态 workload 优化：保持较高探索能力以适应变化
+        self.exploration_weight = 1.5          # 降低初始探索，更快利用
+        self.exploration_decay = 0.995         # 衰减更慢，保持适应能力
+        self.min_exploration_weight = 0.2      # 提高最小值，持续探索应对变化 
         
         # ============ 3. 滑动窗口配置 ============
         self.window_size = 200  # 减小窗口大小，避免 GP 拟合时间过长
