@@ -428,10 +428,10 @@ for i in {0..3}; do
     # Fetch GC logs if they exist (optional, generated when ENABLE_GC_LOG=true)
     scp -i "$KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/gc_$i.log" "./results/gc_$i.log" 2>/dev/null || true
     
-    # Create local directory for experiments data
-    mkdir -p "./results/node_$i_experiments"
-    # Sync experiments directory (CSV/JSON data)
-    rsync -avz -e "ssh -i $KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_agent/experiments/" "./results/node_$i_experiments/"
+    # # Create local directory for experiments data
+    # mkdir -p "./results/node_$i_experiments"
+    # # Sync experiments directory (CSV/JSON data)
+    # rsync -avz -e "ssh -i $KEY" "$USER@$host:${REMOTE_PROJECT_PATH}/server_agent/experiments/" "./results/node_$i_experiments/"
 done
 
 client_host=${NODES[4]}

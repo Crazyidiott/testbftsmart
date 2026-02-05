@@ -98,15 +98,15 @@ T_horizon = 20
 
 # ============= 动作空间配置 =============
 # 与 mock_agent.py 保持一致的保守范围，避免极端值导致系统不稳定
-# BatchSize: 100-2000, 步长 100
-# BatchTimeout: 50-200 ms, 步长 10 (最小值从10改为50，避免超时过短导致请求超时)
+# BatchSize: 100-2000, 步长 200，一共 10 个值
+# BatchTimeout: 50-200 ms, 步长 30 ，一共 6 个值 (最小值从10改为50，避免超时过短导致请求超时)
 BATCH_SIZE_MIN = 100
 BATCH_SIZE_MAX = 2000
-BATCH_SIZE_STEP = 100
+BATCH_SIZE_STEP = 200
 
 BATCH_TIMEOUT_MIN = 50  # 增大最小值，避免极端情况导致请求超时
 BATCH_TIMEOUT_MAX = 200
-BATCH_TIMEOUT_STEP = 10
+BATCH_TIMEOUT_STEP = 30
 
 A_values = torch.arange(BATCH_SIZE_MIN, BATCH_SIZE_MAX + 1, BATCH_SIZE_STEP)   # BatchSize: [100, 200, ..., 2000]
 B_values = torch.arange(BATCH_TIMEOUT_MIN, BATCH_TIMEOUT_MAX + 1, BATCH_TIMEOUT_STEP)  # BatchTimeout: [10, 20, ..., 200]
