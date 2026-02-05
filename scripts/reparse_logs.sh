@@ -345,3 +345,98 @@ fi
 
 echo ">>> Done! Reparsed results saved to ${RESULTS_CSV}"
 echo ">>> Old results backup: ${BACKUP_CSV}"
+
+# ================= Generate Summary =================
+SUMMARY_FILE="${EXPERIMENT_DIR}/reparse_summary.txt"
+echo ">>> Generating summary to ${SUMMARY_FILE}..."
+
+{
+    echo "============================================================"
+    echo "          Experiment Summary (Reparsed)"
+    echo "============================================================"
+    echo "Date: $(date)"
+    echo "Experiment Dir: ${EXPERIMENT_DIR}"
+    echo "Type: ${TYPE}"
+    echo ""
+
+    if [[ "$TYPE" == "static" ]]; then
+        echo "Top 5 Throughput Configurations:"
+        echo "------------------------------------------------------------"
+        if [ -f "$RESULTS_CSV" ]; then
+             # sort by throughput (col 6) desc
+             head -n 1 "$RESULTS_CSV"
+             tail -n +2 "$RESULTS_CSV" | sort -t, -k6 -nr | head -n 5
+        fi
+        echo ""
+        
+        echo "Top 5 Low-Latency Configurations:"
+        echo "------------------------------------------------------------"
+        if [ -f "$RESULTS_CSV" ]; then
+             # sort by latency (col 7) asc
+             head -n 1 "$RESULTS_CSV"
+             tail -n +2 "$RESULTS_CSV" | sort -t, -k7 -n | head -n 5
+        fi
+        echo ""
+
+        # Simplified view per workload
+        echo "Best Configuration per Workload (Maximize Throughput/Latency Ratio):"
+        echo "------------------------------------------------------------"
+        python3 << EOF
+import csv
+import sys
+
+csv_file = "$RESULTS_CSV"
+best_configs = {}
+
+try:
+    with open(csv_file, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                wid = row['workload_id']
+                thr = float(row['avg_throughput'])
+                lat = float(row['avg_latency_us'])
+                rate = row['rate']
+                size = row['request_size']
+                
+                if lat > 0:
+                    score = thr / lat
+                else:
+                    score = 0
+                
+                if wid not in best_configs or score > best_configs[wid]['score']:
+                    best_configs[wid] = {
+                        'score': score,
+                        'bs': row['batch_size'],
+                        'bt': row['batch_timeout'],
+                        'thr': thr,
+                        'lat': lat,
+                        'rate': rate,
+                        'size': size
+                    }
+            except ValueError:
+                continue
+
+    for wid in sorted(best_configs.keys(), key=lambda x: int(x) if x.isdigit() else x):
+        c = best_configs[wid]
+        print(f"Workload {wid} (Rate={c['rate']}, Size={c['size']}): Best [BS={c['bs']}, BT={c['bt']}] -> Thr={c['thr']:.2f} req/s, Lat={c['lat']:.2f} us")
+
+except Exception as e:
+    print(f"Error generating summary: {e}")
+EOF
+    
+    elif [[ "$TYPE" == "dynamic" ]]; then
+        echo "Algorithm Performance Summary:"
+        echo "------------------------------------------------------------"
+        if [ -f "$RESULTS_CSV" ]; then
+            head -n 1 "$RESULTS_CSV"
+            tail -n +2 "$RESULTS_CSV"
+        fi
+        
+        echo ""
+        echo "Note: Check phase_results.csv for detailed performance per workload phase."
+    fi
+
+} > "$SUMMARY_FILE"
+
+cat "$SUMMARY_FILE"
