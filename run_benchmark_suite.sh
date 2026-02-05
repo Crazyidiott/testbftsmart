@@ -1,4 +1,5 @@
 #!/bin/bash
+# 这个脚本out-of-date
 
 # Configuration Arrays
 # Matrix: (BatchSize, Timeout, ClientRatePerThread)
