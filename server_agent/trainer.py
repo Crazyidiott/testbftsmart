@@ -218,7 +218,7 @@ class DataLogger:
         with open(self.params_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['timestamp', 'iteration', 'batch_size', 'batch_timeout', 
-                           'c_parameter', 'option'])
+                           'c_parameter', 'option', 'request_timeout'])
         
         # 初始化算法状态CSV
         with open(self.algorithm_state_file, 'w', newline='') as f:
@@ -250,14 +250,14 @@ class DataLogger:
             writer.writerow([timestamp, self.iteration_count, throughput, latency, 
                            avg_latency, payload, reward if reward else 0])
     
-    def log_parameters(self, batch_size, batch_timeout, c_param, option):
+    def log_parameters(self, batch_size, batch_timeout, c_param, option, request_timeout=0):
         """记录参数调整"""
         timestamp = datetime.now().isoformat()
         
         with open(self.params_file, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([timestamp, self.iteration_count, batch_size, 
-                           batch_timeout, c_param, option])
+                           batch_timeout, c_param, option, request_timeout])
     
     def log_algorithm_state(self, state_dict):
         """记录算法内部状态"""
@@ -785,6 +785,9 @@ class SimulatedAnnealing(OptimizerBase):
         self.min_temperature = 0.005
         self.cooling_rate = 0.99
         
+        # requestTimeout: SA 不主动调参，使用固定中间值
+        self.lastD = D_values[len(D_values) // 2].item()
+        
         # ============= 动态归一化参数 =============
         # 使用全局缩放因子作为初始参考值
         self.ref_thr = THROUGHPUT_SCALE / 10  # 初始参考吞吐量 10k
@@ -898,7 +901,7 @@ class SimulatedAnnealing(OptimizerBase):
             if len(self.old_state) == 0:
                 self.old_state = batch_state
                 self.lastO = option
-            return 128, 0
+            return 128, 0, self.lastD
 
         self.iteration += 1
         
@@ -911,8 +914,8 @@ class SimulatedAnnealing(OptimizerBase):
             self.lastO = option
             self.lastA = self.current_params['batch']
             self.lastB = self.current_params['timeout']
-            print(f"[SA] Iter {self.iteration}: Initialization -> BS={self.lastA}, BT={self.lastB}")
-            return self.lastA, self.lastB
+            print(f"[SA] Iter {self.iteration}: Initialization -> BS={self.lastA}, BT={self.lastB}, RT={self.lastD}")
+            return self.lastA, self.lastB, self.lastD
 
         # 计算当前得分
         current_score = self.normalize_reward(curr_thr, curr_lat)
@@ -981,7 +984,7 @@ class SimulatedAnnealing(OptimizerBase):
                   f"Score={current_score:.4f}, Best={self.best_score:.4f}, "
                   f"No-improve={self.no_improvement_count}")
         
-        return next_a, next_b
+        return next_a, next_b, self.lastD
 
     def get_algorithm_state(self):
         """
@@ -1067,25 +1070,30 @@ class SimulatedAnnealing(OptimizerBase):
 
 # ============= PPO 实现 =============
 class PPO(nn.Module, OptimizerBase):
-    """PPO 算法（保留完整的 option == 2 逻辑）"""
+    """PPO 算法 - 支持双频率调参: batch(1s) + requestTimeout(10s)"""
     
     def __init__(self):
         super(PPO, self).__init__()
         OptimizerBase.__init__(self)  # 初始化基类
         
         self.data = []
+        self.timeout_data = []  # requestTimeout 的独立经验缓冲区
 
         # 输入维度: [throughput, latency, size, tot_thr, tot_lat, tot_size, arrival_rate]
-        input_dims = 7  # 修复：从 6 改为 7，匹配新增的 size 和 arrival_rate
+        input_dims = 7
         hidden_dims = 64
 
         self.fc1 = nn.Linear(input_dims, hidden_dims)
         self.fc_pi_a = nn.Linear(hidden_dims, len(A_values))
         self.fc_pi_b = nn.Linear(hidden_dims, len(B_values))
         self.fc_pi_c = nn.Linear(hidden_dims, len(C_values))
+        self.fc_pi_d = nn.Linear(hidden_dims, len(D_values))  # requestTimeout head
         self.fc_v = nn.Linear(hidden_dims, 1)
 
         self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+        
+        # 初始 requestTimeout
+        self.lastD = D_values[len(D_values) // 2].item()
 
     def pi(self, x, softmax_dim=-1):
         x = F.relu(self.fc1(x))
@@ -1094,12 +1102,22 @@ class PPO(nn.Module, OptimizerBase):
         prob_c = F.softmax(self.fc_pi_c(x), dim=softmax_dim)
         return prob_a, prob_b, prob_c
 
+    def pi_d(self, x, softmax_dim=-1):
+        """RequestTimeout 策略头（独立输出）"""
+        x = F.relu(self.fc1(x))
+        prob_d = F.softmax(self.fc_pi_d(x), dim=softmax_dim)
+        return prob_d
+
     def v(self, x):
         x = F.relu(self.fc1(x))
         return self.fc_v(x)
 
     def put_data(self, transition):
         self.data.append(transition)
+
+    def put_timeout_data(self, transition):
+        """存储 timeout 经验: (s, d, r, s_prime, prob_d)"""
+        self.timeout_data.append(transition)
 
     def make_batch(self):
         s_lst, a_lst, b_lst, c_lst, r_lst, s_prime_lst = [], [], [], [], [], []
@@ -1129,6 +1147,26 @@ class PPO(nn.Module, OptimizerBase):
         
         self.data = []
         return s, a, b, c, r, s_prime, prob_a, prob_b, prob_c
+
+    def make_timeout_batch(self):
+        """构建 timeout 训练批次"""
+        s_lst, d_lst, r_lst, s_prime_lst, prob_d_lst = [], [], [], [], []
+        
+        for s, d, r, s_prime, p_d in self.timeout_data:
+            s_lst.append(s)
+            d_lst.append([d])
+            r_lst.append([r])
+            s_prime_lst.append(s_prime)
+            prob_d_lst.append([p_d])
+        
+        s = torch.tensor(np.array(s_lst), dtype=torch.float)
+        d = torch.tensor(np.array(d_lst))
+        r = torch.tensor(np.array(r_lst))
+        s_prime = torch.tensor(np.array(s_prime_lst), dtype=torch.float)
+        prob_d = torch.tensor(np.array(prob_d_lst))
+        
+        self.timeout_data = []
+        return s, d, r, s_prime, prob_d
 
     def train_net(self):
         s, a, b, c, r, s_prime, prob_a, prob_b, prob_c = self.make_batch()
@@ -1173,6 +1211,40 @@ class PPO(nn.Module, OptimizerBase):
             loss.mean().backward()
             self.optimizer.step()
 
+    def train_timeout_net(self):
+        """训练 timeout 策略头（独立 PPO 更新）"""
+        if len(self.timeout_data) == 0:
+            return
+        
+        s, d, r, s_prime, prob_d = self.make_timeout_batch()
+        
+        for i in range(K_epoch):
+            td_target = r + gamma * self.v(s_prime)
+            delta = td_target - self.v(s)
+            delta = delta.detach().numpy()
+            
+            advantage_lst = []
+            advantage = 0.0
+            for delta_t in delta[::-1]:
+                advantage = gamma * lmbda * advantage + delta_t[0]
+                advantage_lst.append([advantage])
+            advantage_lst.reverse()
+            advantage = torch.tensor(advantage_lst, dtype=torch.float)
+            
+            pi_d = self.pi_d(s, softmax_dim=1)
+            pi_d = pi_d.gather(1, d)
+            
+            ratio_d = torch.exp(torch.log(pi_d) - torch.log(prob_d))
+            
+            surr1 = ratio_d * advantage
+            surr2 = torch.clamp(ratio_d, 1 - eps_clip, 1 + eps_clip) * advantage
+            
+            loss = -torch.min(surr1, surr2).mean() + F.smooth_l1_loss(self.v(s), td_target.detach())
+            
+            self.optimizer.zero_grad()
+            loss.mean().backward()
+            self.optimizer.step()
+
     def select_action(self, s):
         prob_a, prob_b, prob_c = self.pi(torch.from_numpy(s).float())
         a = Categorical(prob_a).sample().item()
@@ -1180,8 +1252,14 @@ class PPO(nn.Module, OptimizerBase):
         c = Categorical(prob_c).sample().item()
         return a, b, c
 
+    def select_timeout_action(self, s):
+        """选择 requestTimeout 动作"""
+        prob_d = self.pi_d(torch.from_numpy(s).float())
+        d = Categorical(prob_d).sample().item()
+        return d, prob_d[d].item()
+
     def modelUpdate(self, batch_state, option):
-        """PPO 的完整更新逻辑"""
+        """PPO 双频率更新逻辑"""
         
         # 使用动作空间的中间值作为初始参数
         initial_batch = A_values[len(A_values) // 2].item()
@@ -1191,17 +1269,18 @@ class PPO(nn.Module, OptimizerBase):
         if len(self.old_state) == 0:
             self.old_state = batch_state
             self.lastO = option
+            self.lastD = D_values[len(D_values) // 2].item()
             if option == 1:
                 self.lastA, self.lastB = initial_batch, initial_timeout
-                return self.lastA, self.lastB
+                return self.lastA, self.lastB, self.lastD
             else:  # option == 2
                 self.lastC = 128
-                return self.lastC, 0
+                return self.lastC, 0, self.lastD
 
         # 计算 reward (使用归一化后的值)
         norm_thr = self.old_state[0] / THROUGHPUT_SCALE
         norm_lat = self.old_state[1] / LATENCY_SCALE
-        reward = c_thr * norm_thr + c_lat * norm_lat  # c_thr=1.0, c_lat=-1.0
+        reward = c_thr * norm_thr + c_lat * norm_lat
 
         norm_state = Normalized(self.old_state)
         prob_a, prob_b, prob_c = self.pi(torch.from_numpy(norm_state).float())
@@ -1210,17 +1289,21 @@ class PPO(nn.Module, OptimizerBase):
         b = (torch.abs(B_values - self.lastB)).argmin().item()
         c = (torch.abs(C_values - self.lastC)).argmin().item()
 
-        # 存储经验 (reward 已经是归一化后的值，不需要再除以 40000)
+        # 存储 batch 经验
         if self.lastO == 1:
             self.put_data((norm_state, a, b, 0, reward, Normalized(batch_state),
                           prob_a[a].item(), prob_b[b].item(), 1.0))
-        else:  # lastO == 2
+        else:
             self.put_data((norm_state, 0, 0, c, reward, Normalized(batch_state),
                           1.0, 1.0, prob_c[c].item()))
         
         self.score += reward
 
-        # 训练
+        # 累积 timeout reward
+        self.timeout_reward_accumulator += reward
+        self.timeout_reward_count += 1
+
+        # 训练 batch 网络
         if len(self.data) >= 1:
             self.train_net()
 
@@ -1228,30 +1311,62 @@ class PPO(nn.Module, OptimizerBase):
         self.old_state = batch_state
         self.lastO = option
 
-        # 选择下一个动作
+        # --- Timeout 双频率逻辑 ---
+        self.timeout_iteration += 1
+        should_update_timeout = (self.timeout_iteration % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0)
+        
+        if should_update_timeout and self.timeout_reward_count > 0:
+            avg_reward = self.timeout_reward_accumulator / self.timeout_reward_count
+            
+            # 存储 timeout 经验（使用上一轮的 timeout 动作和累积 reward）
+            d_idx = (torch.abs(D_values - self.lastD)).argmin().item()
+            prob_d = self.pi_d(torch.from_numpy(norm_state).float())
+            self.put_timeout_data((norm_state, d_idx, avg_reward, 
+                                   Normalized(batch_state), prob_d[d_idx].item()))
+            
+            # 训练 timeout 网络
+            if len(self.timeout_data) >= 1:
+                self.train_timeout_net()
+            
+            # 选择新的 timeout
+            d_new, _ = self.select_timeout_action(Normalized(batch_state))
+            new_d = D_values[d_new].item()
+            new_d = self._enforce_timeout_constraint(new_d, self.lastB if option == 1 else 
+                                                      B_values[len(B_values) // 2].item())
+            self.lastD = new_d
+            
+            print(f"[PPO] Timeout update: RT={self.lastD}, avg_reward={avg_reward:.4f}")
+            
+            # 重置累积器
+            self.timeout_reward_accumulator = 0.0
+            self.timeout_reward_count = 0
+
+        # 选择下一个 batch 动作
         a, b, c = self.select_action(Normalized(self.old_state))
         
         if option == 1:
             self.lastA = A_values[a].item()
             self.lastB = B_values[b].item()
-            return self.lastA, self.lastB
+            return self.lastA, self.lastB, self.lastD
         else:  # option == 2
             self.lastC = C_values[c].item()
-            return self.lastC, 0
+            return self.lastC, 0, self.lastD
     
-    # ========== 修改3（续）：为PPO添加状态导出 ==========
+    # ========== PPO 状态导出 ==========
     def get_algorithm_state(self):
         """导出算法状态用于记录"""
         return {
-            'data_buffer_size': len(self.data)
+            'data_buffer_size': len(self.data),
+            'timeout_buffer_size': len(self.timeout_data)
         }
-    # ================================================
 
     def save_model(self):
         model_path = 'ppo_model.pth'
         torch.save({
             'model_state': self.state_dict(),
-            'optimizer_state': self.optimizer.state_dict()
+            'optimizer_state': self.optimizer.state_dict(),
+            'lastD': self.lastD,
+            'timeout_iteration': self.timeout_iteration
         }, model_path)
 
     def load_model(self):
@@ -1260,14 +1375,17 @@ class PPO(nn.Module, OptimizerBase):
             checkpoint = torch.load(model_path)
             self.load_state_dict(checkpoint['model_state'])
             self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+            self.lastD = checkpoint.get('lastD', D_values[len(D_values) // 2].item())
+            self.timeout_iteration = checkpoint.get('timeout_iteration', 0)
 
 # ============= Static Optimizer =============
 class StaticOptimizer(OptimizerBase):
     """静态优化器 - 保持初始参数不变
     
     参数可以通过环境变量设置：
-      STATIC_BATCH_SIZE   - 批量大小 (默认: 动作空间中间值)
+      STATIC_BATCH_SIZE    - 批量大小 (默认: 动作空间中间值)
       STATIC_BATCH_TIMEOUT - 批量超时 (默认: 动作空间中间值)
+      STATIC_REQUEST_TIMEOUT - 请求超时 (默认: D_values中间值)
     """
     
     def __init__(self):
@@ -1293,12 +1411,23 @@ class StaticOptimizer(OptimizerBase):
         
         self.default_c_parameter = 128  # 默认的 C 参数
         
+        # RequestTimeout 参数
+        env_request_timeout = os.environ.get('STATIC_REQUEST_TIMEOUT')
+        if env_request_timeout is not None:
+            self.default_request_timeout = int(env_request_timeout)
+            print(f"[STATIC] RequestTimeout from environment: {self.default_request_timeout}")
+        else:
+            self.default_request_timeout = D_values[len(D_values)//2].item()
+            print(f"[STATIC] RequestTimeout from default (middle of action space): {self.default_request_timeout}")
+        self.lastD = self.default_request_timeout
+        
         # 是否已经初始化
         self.initialized = False
         
         print(f"[STATIC] Initialized with parameters:")
         print(f"  Batch Size: {self.default_batch_size}")
         print(f"  Batch Timeout: {self.default_batch_timeout}")
+        print(f"  Request Timeout: {self.default_request_timeout}")
         print(f"  C Parameter: {self.default_c_parameter}")
     
     def modelUpdate(self, batch_state, option):
@@ -1313,12 +1442,12 @@ class StaticOptimizer(OptimizerBase):
             if option == 1:
                 self.lastA = self.default_batch_size
                 self.lastB = self.default_batch_timeout
-                print(f"[STATIC] First call (option=1): BS={self.lastA}, BT={self.lastB}")
-                return self.lastA, self.lastB
+                print(f"[STATIC] First call (option=1): BS={self.lastA}, BT={self.lastB}, RT={self.lastD}")
+                return self.lastA, self.lastB, self.lastD
             else:  # option == 2
                 self.lastC = self.default_c_parameter
                 print(f"[STATIC] First call (option=2): C={self.lastC}")
-                return self.lastC, 0
+                return self.lastC, 0, self.lastD
         
         # ========== 后续调用：计算 reward 但不改变参数 ==========
         # 计算当前 reward（使用归一化值）
@@ -1333,11 +1462,11 @@ class StaticOptimizer(OptimizerBase):
         
         # ========== option == 1: 返回固定的 batch size 和 timeout ==========
         if option == 1:
-            return self.default_batch_size, self.default_batch_timeout
+            return self.default_batch_size, self.default_batch_timeout, self.lastD
         
         # ========== option == 2: 返回固定的 C 参数 ==========
         else:
-            return self.default_c_parameter, 0
+            return self.default_c_parameter, 0, self.lastD
     
     def save_model(self):
         """保存模型参数（对于静态优化器来说是空操作）"""
@@ -1411,6 +1540,9 @@ class CyclicConfigOptimizer(OptimizerBase):
         
         # 默认的 C 参数（用于 option=2）
         self.default_c_parameter = 128
+        
+        # RequestTimeout: 使用固定中间值（Cyclic 不主动调参）
+        self.lastD = D_values[len(D_values) // 2].item()
         
         # 统计信息
         self.switch_count = 0                  # 切换次数
@@ -1488,12 +1620,12 @@ class CyclicConfigOptimizer(OptimizerBase):
             self.config_usage_count[self.current_config_index] += 1
             
             if option == 1:
-                print(f"[CYCLIC] First call (option=1): BS={self.lastA}, BT={self.lastB}")
-                return self.lastA, self.lastB
+                print(f"[CYCLIC] First call (option=1): BS={self.lastA}, BT={self.lastB}, RT={self.lastD}")
+                return self.lastA, self.lastB, self.lastD
             else:  # option == 2
                 self.lastC = self.default_c_parameter
                 print(f"[CYCLIC] First call (option=2): C={self.lastC}")
-                return self.lastC, 0
+                return self.lastC, 0, self.lastD
         
         # ========== 计算 reward（使用归一化值）==========
         norm_thr = batch_state[0] / THROUGHPUT_SCALE
@@ -1513,11 +1645,11 @@ class CyclicConfigOptimizer(OptimizerBase):
         
         # ========== option == 1: 返回当前配置 ==========
         if option == 1:
-            return self.lastA, self.lastB
+            return self.lastA, self.lastB, self.lastD
         
         # ========== option == 2: 返回默认 C 参数 ==========
         else:
-            return self.default_c_parameter, 0
+            return self.default_c_parameter, 0, self.lastD
     
     def get_algorithm_state(self):
         """
@@ -1676,14 +1808,14 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
         start = time.perf_counter()
         
         option = request.option % 100
-        batchSize, batchTimeout = self.model.modelUpdate(new_state, option)
+        batchSize, batchTimeout, requestTimeout = self.model.modelUpdate(new_state, option)
         
         end = time.perf_counter()
         print(f"Update time: {end - start:.6f} seconds")
         
         # ========== 记录参数调整 ==========
         c_param = self.model.lastC if option == 2 else 0
-        self.data_logger.log_parameters(batchSize, batchTimeout, c_param, option)
+        self.data_logger.log_parameters(batchSize, batchTimeout, c_param, option, requestTimeout)
         
         # ========== 修改5：记录算法状态 ==========
         if hasattr(self.model, 'get_algorithm_state'):
@@ -1695,11 +1827,12 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
         print(f"[{ALGORITHM}] Iter {self.data_logger.iteration_count}: "
               f"Thr={throughput:.2f}, Lat={latency:.2f}, "
               f"BatchSize={batchSize}, BatchTimeout={batchTimeout}, "
-              f"Score={self.model.score:.4f}")
+              f"RequestTimeout={requestTimeout}, Score={self.model.score:.4f}")
         
         # ========== 处理 option == 1（batch size/timeout 调整）==========
         if option == 1:
-            return monitor_pb2.MetricsResponse(BatchSize=batchSize, BatchTimeout=batchTimeout)
+            return monitor_pb2.MetricsResponse(BatchSize=batchSize, BatchTimeout=batchTimeout,
+                                               RequestTimeout=int(requestTimeout))
         
         # ========== 处理 option == 2（C 参数调整，需要共识）==========
         else:
