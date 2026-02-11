@@ -28,6 +28,10 @@ public class RLAgentConnector {
     // Total: ~40-45 seconds for system to reach steady state
     private static final int WARMUP_TIME_MS = 10000; // 10s warmup
     private static final int MONITOR_INTERVAL_MS = 1000; // 1s interval
+    // Request timeout is adjusted less frequently than batch params to avoid system oscillation.
+    // Update every 10 monitoring intervals = every 10 seconds.
+    private static final int REQUEST_TIMEOUT_UPDATE_INTERVAL = 10;
+    private int monitorLoopCounter = 0;
 
     public RLAgentConnector(ServiceReplica serviceReplica, ThroughputLatencyServer serverInstance) {
         this.serviceReplica = serviceReplica;
@@ -149,12 +153,16 @@ public class RLAgentConnector {
                 // 4. Apply Tuning (if response is valid)
                 int newBatchSize = response.getBatchSize();
                 int newBatchTimeout = response.getBatchTimeout();
+                int newRequestTimeout = response.getRequestTimeout();
                 
                 if (newBatchSize > 0 && newBatchTimeout >= -1) {
-                    // Check if different from current config to avoid spamming logs? 
-                    // ServiceReplica/TOMConfiguration logic handles updates efficiently.
-                    
-                    serviceReplica.setDynamicConsensusConfig(newBatchSize, newBatchTimeout);
+                    monitorLoopCounter++;
+                    // Request timeout is updated less frequently to avoid oscillation
+                    if (newRequestTimeout > 0 && (monitorLoopCounter % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0)) {
+                        serviceReplica.setDynamicConsensusConfig(newBatchSize, newBatchTimeout, newRequestTimeout);
+                    } else {
+                        serviceReplica.setDynamicConsensusConfig(newBatchSize, newBatchTimeout);
+                    }
                 }
 
             } catch (StatusRuntimeException e) {

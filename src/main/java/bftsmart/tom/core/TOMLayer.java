@@ -216,11 +216,19 @@ public final class TOMLayer extends Thread implements RequestReceiver {
     }
 
     public void onConfigurationChanged() {
+        // 1. Handle batchTimer update
         if (controller.getStaticConf().getBatchTimeout() > -1) {
             startBatchTimer();
         } else if (batchTimer != null) {
             batchTimer.cancel();
             batchTimer = null;
+        }
+
+        // 2. Handle requestTimeout update (view change timeout)
+        if (requestsTimer != null) {
+            long newTimeout = controller.getStaticConf().getRequestTimeout();
+            requestsTimer.setTimeout(newTimeout);
+            logger.info("Request timeout updated to {} ms", newTimeout);
         }
     }
 

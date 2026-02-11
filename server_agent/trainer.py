@@ -112,9 +112,19 @@ A_values = torch.arange(BATCH_SIZE_MIN, BATCH_SIZE_MAX + 1, BATCH_SIZE_STEP)   #
 B_values = torch.arange(BATCH_TIMEOUT_MIN, BATCH_TIMEOUT_MAX + 1, BATCH_TIMEOUT_STEP)  # BatchTimeout: [10, 20, ..., 200]
 C_values = torch.tensor([8, 16, 32, 64, 128, 256, 512, 1024])
 
+# RequestTimeout: 1000-10000 ms, 步长 1000, 共 10 个值
+# 这是 view change 的触发超时，调整频率比 batch 参数低（每 10 个监控周期一次）
+REQUEST_TIMEOUT_MIN = 1000
+REQUEST_TIMEOUT_MAX = 10000
+REQUEST_TIMEOUT_STEP = 1000
+REQUEST_TIMEOUT_UPDATE_INTERVAL = 10  # 每 10 个 modelUpdate 调用才重新决策一次 requestTimeout
+
+D_values = torch.arange(REQUEST_TIMEOUT_MIN, REQUEST_TIMEOUT_MAX + 1, REQUEST_TIMEOUT_STEP)  # RequestTimeout: [1000, 2000, ..., 10000]
+
 print(f"[Config] Action space:")
 print(f"[Config]   BatchSize: {A_values.min().item()} - {A_values.max().item()}, {len(A_values)} values")
 print(f"[Config]   BatchTimeout: {B_values.min().item()} - {B_values.max().item()}, {len(B_values)} values")
+print(f"[Config]   RequestTimeout: {D_values.min().item()} - {D_values.max().item()}, {len(D_values)} values")
 
 # ============= 缩放因子配置 =============
 # 基于实际观测数据设置：
@@ -314,9 +324,15 @@ class OptimizerBase(ABC):
         self.lastA = 0
         self.lastB = 0
         self.lastC = 0
+        self.lastD = 0  # requestTimeout (view change timeout)
         self.lastO = 0
         self.iteration = 0
         self.shift_interval_iters = 10  # 每10s发生一次workload shift
+        
+        # 双频率调参：requestTimeout 每 REQUEST_TIMEOUT_UPDATE_INTERVAL 步决策一次
+        self.timeout_iteration = 0  # requestTimeout 的独立迭代计数器
+        self.timeout_reward_accumulator = 0.0  # 累积 reward（10 步平均）
+        self.timeout_reward_count = 0
 
     
     @abstractmethod
@@ -324,11 +340,21 @@ class OptimizerBase(ABC):
         """
         主更新函数
         
-        返回：
-        - option == 1: (batch_size, batch_timeout)
-        - option == 2: (c_parameter, 0) 或 (default_value, 0)
+        返回三元组：
+        - option == 1: (batch_size, batch_timeout, request_timeout)
+        - option == 2: (c_parameter, 0, request_timeout)
+        
+        request_timeout <= 0 表示本轮不更新 requestTimeout
         """
         pass
+    
+    def _enforce_timeout_constraint(self, request_timeout, batch_timeout):
+        """
+        强制执行 requestTimeout >= batchTimeout * 5 的安全约束。
+        防止 requestTimeout 过短导致频繁触发 view change。
+        """
+        min_allowed = max(int(batch_timeout * 5), REQUEST_TIMEOUT_MIN)
+        return max(request_timeout, min_allowed)
     
     def save_model(self):
         """保存模型（可选实现）"""
@@ -345,22 +371,28 @@ class OptimizerBase(ABC):
         self.lastA = 0
         self.lastB = 0
         self.lastC = 0
+        self.lastD = 0
         self.lastO = 0
+        self.timeout_iteration = 0
+        self.timeout_reward_accumulator = 0.0
+        self.timeout_reward_count = 0
 
 class BayesianOptimizer(OptimizerBase):
     """
-    Sliding Window Contextual Bayesian Optimizer (Final Version)
+    Sliding Window Contextual Bayesian Optimizer (Dual-GP Version)
     
     Features:
-    1. Reward: Fixed-Max Normalization (0.5/-0.5 weights) - Aligned with RL baseline physically.
-    2. Timing: Fixed temporal alignment (cold start fix).
-    3. Logging: Compatible with legacy DataLogger format.
+    1. GP1: Batch params (batchSize, batchTimeout) - updated every call (1s)
+    2. GP2: RequestTimeout - updated every REQUEST_TIMEOUT_UPDATE_INTERVAL calls (10s)
+       - GP2 takes current_batchTimeout as context input to learn coupling
+    3. Safety constraint: requestTimeout >= max(batchTimeout * 5, 1000ms)
+    4. Reward: Fixed-Max Normalization (0.5/-0.5 weights)
     """
     
     def __init__(self):
         super().__init__()
         
-        # ============ 1. GP 核函数配置 ============
+        # ============ 1. GP1 核函数配置 (Batch params) ============
         self.gp_kernel = Matern(
             nu=2.5,
             length_scale=[1.0] * 5,
@@ -370,20 +402,37 @@ class BayesianOptimizer(OptimizerBase):
         self.gp_alpha = 1e-5
         self.gp_n_restarts = 5 
         
-        # ============ 2. 探索-利用参数 ============
-        # 针对动态 workload 优化：保持较高探索能力以适应变化
-        self.exploration_weight = 1.5          # 降低初始探索，更快利用
-        self.exploration_decay = 0.995         # 衰减更慢，保持适应能力
-        self.min_exploration_weight = 0.2      # 提高最小值，持续探索应对变化 
+        # ============ 2. GP2 核函数配置 (RequestTimeout) ============
+        self.gp_timeout_kernel = Matern(
+            nu=2.5,
+            length_scale=[1.0] * 3,  # 3维: arrival_rate, batchTimeout, requestTimeout
+            length_scale_bounds=(0.1, 100.0)
+        )
         
-        # ============ 3. 滑动窗口配置 ============
-        self.window_size = 200  # 减小窗口大小，避免 GP 拟合时间过长
+        # ============ 3. 探索-利用参数 ============
+        # GP1 探索参数
+        self.exploration_weight = 1.5
+        self.exploration_decay = 0.995
+        self.min_exploration_weight = 0.2
         
-        # 历史数据
+        # GP2 探索参数（独立衰减）
+        self.timeout_exploration_weight = 2.0     # 初始探索更高（样本少）
+        self.timeout_exploration_decay = 0.98      # 衰减更快（每10s才更新一次）
+        self.min_timeout_exploration_weight = 0.3
+        
+        # ============ 4. 滑动窗口配置 ============
+        self.window_size = 200          # GP1 窗口
+        self.timeout_window_size = 50   # GP2 窗口（更新频率低，窗口小）
+        
+        # GP1 历史数据
         self.X_history = []
         self.y_history = []
         
-        # ============ 4. 模型初始化 ============
+        # GP2 历史数据
+        self.X_timeout_history = []
+        self.y_timeout_history = []
+        
+        # ============ 5. 模型初始化 ============
         self.gp = GaussianProcessRegressor(
             kernel=self.gp_kernel,
             alpha=self.gp_alpha,
@@ -391,36 +440,55 @@ class BayesianOptimizer(OptimizerBase):
             n_restarts_optimizer=self.gp_n_restarts
         )
         
+        self.gp_timeout = GaussianProcessRegressor(
+            kernel=self.gp_timeout_kernel,
+            alpha=self.gp_alpha,
+            normalize_y=True,
+            n_restarts_optimizer=self.gp_n_restarts
+        )
+        
         self.pending_experience = None
+        self.pending_timeout_experience = None  # GP2 pending experience
         self.model_path = "bo_model.pkl"
         
-        # ============ 5. Reward 归一化常数 ============
-        # 使用全局缩放因子，基于实际观测数据设置
-        # 吞吐量: 40k-60k ops/s, 延迟: 10k-30k 微秒
-        self.MAX_THR_LIMIT = THROUGHPUT_SCALE  # 100k ops/s
-        self.MAX_LAT_LIMIT = LATENCY_SCALE * 2  # 100k 微秒 = 100ms (给延迟留更多空间)
+        # ============ 6. Reward 归一化常数 ============
+        self.MAX_THR_LIMIT = THROUGHPUT_SCALE
+        self.MAX_LAT_LIMIT = LATENCY_SCALE * 2
         
-        print("[BO] Sliding Window Contextual BO initialized (Fixed Max Norm)")
+        # ============ 7. 初始 requestTimeout ============
+        self.lastD = D_values[len(D_values) // 2].item()  # 中间值 5000ms
+        
+        print("[BO] Dual-GP Contextual BO initialized")
         print(f"[BO]   MAX_THR_LIMIT: {self.MAX_THR_LIMIT}, MAX_LAT_LIMIT: {self.MAX_LAT_LIMIT}")
         print(f"[BO]   Action space: BatchSize [{A_values.min().item()}-{A_values.max().item()}], "
-              f"BatchTimeout [{B_values.min().item()}-{B_values.max().item()}]")
+              f"BatchTimeout [{B_values.min().item()}-{B_values.max().item()}], "
+              f"RequestTimeout [{D_values.min().item()}-{D_values.max().item()}]")
         
     def _compute_derived_features(self, state, batch_size, batch_timeout):
-        """构建 Context + Action + Derived Features"""
+        """构建 GP1 的 Context + Action + Derived Features"""
         norm_state = Normalized(state)
         interaction = batch_size * batch_timeout 
         ratio = batch_size / (batch_timeout + 1e-6)
         
         return np.concatenate([
-            [norm_state[6]], # Context
+            [norm_state[6]], # Context: arrival_rate
             [batch_size],    # Action
             [batch_timeout], # Action
             [interaction],   # Derived
             [ratio]          # Derived
         ])
 
+    def _compute_timeout_features(self, state, batch_timeout, request_timeout):
+        """构建 GP2 的特征: (arrival_rate, batchTimeout, requestTimeout)"""
+        norm_state = Normalized(state)
+        return np.array([
+            norm_state[6],    # arrival_rate (context)
+            batch_timeout,    # current batchTimeout (context - captures coupling)
+            request_timeout   # action
+        ])
+
     def _select_action_ucb(self, state):
-        """全动作空间 UCB 搜索"""
+        """GP1: 全动作空间 UCB 搜索 (batch params)"""
         candidate_features = []
         candidate_actions = []
         
@@ -437,6 +505,26 @@ class BayesianOptimizer(OptimizerBase):
         best_idx = np.argmax(ucb_values)
         return candidate_actions[best_idx]
 
+    def _select_timeout_ucb(self, state, current_batch_timeout):
+        """GP2: RequestTimeout UCB 搜索，带约束"""
+        candidate_features = []
+        candidate_actions = []
+        
+        for d_val in D_values:
+            d = d_val.item()
+            # 约束生效：只考虑满足约束的值
+            d_constrained = self._enforce_timeout_constraint(d, current_batch_timeout)
+            features = self._compute_timeout_features(state, current_batch_timeout, d_constrained)
+            candidate_features.append(features)
+            candidate_actions.append(d_constrained)
+        
+        X_test = np.array(candidate_features)
+        mu, sigma = self.gp_timeout.predict(X_test, return_std=True)
+        ucb_values = mu + self.timeout_exploration_weight * sigma
+        
+        best_idx = np.argmax(ucb_values)
+        return candidate_actions[best_idx]
+
     def modelUpdate(self, batch_state, option):
         self.iteration += 1
         
@@ -445,9 +533,9 @@ class BayesianOptimizer(OptimizerBase):
             if len(self.old_state) == 0:
                 self.old_state = batch_state
                 self.lastO = option
-            return 128, 0
+            return 128, 0, self.lastD
             
-        # ============ Option 1: 处理 Batch 参数 ============
+        # ============ Option 1: 处理 Batch + RequestTimeout 参数 ============
         
         # --- 1. 冷启动逻辑 (Time Alignment Fix) ---
         if len(self.old_state) == 0:
@@ -457,28 +545,30 @@ class BayesianOptimizer(OptimizerBase):
             # 初始动作
             self.lastA = A_values[len(A_values)//2].item()
             self.lastB = B_values[len(B_values)//2].item()
+            self.lastD = D_values[len(D_values)//2].item()
             
-            # 关键: 刚启动时不记录 pending experience，等待动作执行一轮
             self.pending_experience = None 
+            self.pending_timeout_experience = None
             
-            print(f"[BO] Cold start: ({self.lastA}, {self.lastB})")
-            return self.lastA, self.lastB
+            print(f"[BO] Cold start: BS={self.lastA}, BT={self.lastB}, RT={self.lastD}")
+            return self.lastA, self.lastB, self.lastD
 
         # --- 2. Reward 计算 (Fixed Max Norm + Equal Weights) ---
         curr_thr = batch_state[0]
         curr_lat = batch_state[1]
         
-        # 归一化到 [0, 1] 附近
         norm_thr = curr_thr / self.MAX_THR_LIMIT
         norm_lat = curr_lat / self.MAX_LAT_LIMIT
         
-        # 核心公式: 0.5 * 吞吐增益 - 0.5 * 延迟惩罚
-        # 乘以 100 是为了让日志里的数字好看一点，对优化无影响
         current_score = 100.0 * (0.5 * norm_thr - 0.5 * norm_lat)
         
         self.score += current_score
 
-        # --- 3. 记录经验 (Context + Action -> Reward) ---
+        # --- 3. 累积 reward 用于 GP2 (10步平均) ---
+        self.timeout_reward_accumulator += current_score
+        self.timeout_reward_count += 1
+
+        # --- 4. GP1 经验记录 (Context + Action -> Reward) ---
         if self.pending_experience is not None and self.lastO == 1:
             X = self._compute_derived_features(
                 self.pending_experience['state'],
@@ -489,35 +579,64 @@ class BayesianOptimizer(OptimizerBase):
             self.X_history.append(X)
             self.y_history.append(current_score)
             
-            # 滑动窗口维护
             if len(self.X_history) > self.window_size:
                 self.X_history.pop(0)
                 self.y_history.pop(0)
             
-            # 在线训练 (样本够了就开始)
             if len(self.X_history) >= 20:
                 try:
                     self.gp.fit(np.array(self.X_history), np.array(self.y_history))
                 except Exception as e:
-                    print(f"[BO] GP fit error: {e}")
+                    print(f"[BO] GP1 fit error: {e}")
+
+        # --- 5. GP2 经验记录 (每 10 步) ---
+        self.timeout_iteration += 1
+        should_update_timeout = (self.timeout_iteration % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0)
+        
+        if should_update_timeout and self.timeout_reward_count > 0:
+            avg_timeout_reward = self.timeout_reward_accumulator / self.timeout_reward_count
+            
+            # 记录 GP2 经验
+            if self.pending_timeout_experience is not None:
+                X_t = self._compute_timeout_features(
+                    self.pending_timeout_experience['state'],
+                    self.pending_timeout_experience['batch_timeout'],
+                    self.pending_timeout_experience['request_timeout']
+                )
+                self.X_timeout_history.append(X_t)
+                self.y_timeout_history.append(avg_timeout_reward)
+                
+                if len(self.X_timeout_history) > self.timeout_window_size:
+                    self.X_timeout_history.pop(0)
+                    self.y_timeout_history.pop(0)
+                
+                if len(self.X_timeout_history) >= 5:
+                    try:
+                        self.gp_timeout.fit(
+                            np.array(self.X_timeout_history),
+                            np.array(self.y_timeout_history)
+                        )
+                    except Exception as e:
+                        print(f"[BO] GP2 fit error: {e}")
+            
+            # 重置累积器
+            self.timeout_reward_accumulator = 0.0
+            self.timeout_reward_count = 0
 
         self.old_state = batch_state
         self.lastO = option
 
-        # --- 4. 选择动作 ---
-        # 前 20 轮随机探索，积累初始数据
+        # --- 6. GP1: 选择 batch 动作 ---
         if len(self.X_history) < 20:
             a_idx = np.random.randint(0, len(A_values))
             b_idx = np.random.randint(0, len(B_values))
             new_a, new_b = A_values[a_idx].item(), B_values[b_idx].item()
             
             if self.iteration % 5 == 0:
-                print(f"[BO] Random Init: {len(self.X_history)}/20 | Score: {current_score:.4f}")
-        # 之后使用 GP-UCB
+                print(f"[BO] GP1 Random Init: {len(self.X_history)}/20 | Score: {current_score:.4f}")
         else:
             new_a, new_b = self._select_action_ucb(batch_state)
             
-            # 衰减探索率
             self.exploration_weight = max(
                 self.min_exploration_weight,
                 self.exploration_weight * self.exploration_decay
@@ -526,22 +645,49 @@ class BayesianOptimizer(OptimizerBase):
         self.lastA = new_a
         self.lastB = new_b
         
-        # --- 5. 准备下一轮经验 ---
+        # --- 7. GP2: 选择 requestTimeout (仅每 10 步) ---
+        if should_update_timeout:
+            if len(self.X_timeout_history) < 5:
+                d_idx = np.random.randint(0, len(D_values))
+                new_d = D_values[d_idx].item()
+                new_d = self._enforce_timeout_constraint(new_d, self.lastB)
+                
+                print(f"[BO] GP2 Random Init: {len(self.X_timeout_history)}/5 | RT={new_d}")
+            else:
+                new_d = self._select_timeout_ucb(batch_state, self.lastB)
+                
+                self.timeout_exploration_weight = max(
+                    self.min_timeout_exploration_weight,
+                    self.timeout_exploration_weight * self.timeout_exploration_decay
+                )
+                print(f"[BO] GP2 UCB -> RT={new_d}, explore={self.timeout_exploration_weight:.3f}")
+            
+            self.lastD = new_d
+            
+            # 准备 GP2 pending experience
+            self.pending_timeout_experience = {
+                'state': batch_state.copy(),
+                'batch_timeout': self.lastB,
+                'request_timeout': self.lastD
+            }
+        
+        # --- 8. 准备 GP1 pending experience ---
         self.pending_experience = {
             'state': batch_state.copy(),
             'action_bs': self.lastA,
             'action_bt': self.lastB
         }
         
-        return self.lastA, self.lastB
+        return self.lastA, self.lastB, self.lastD
 
     def get_algorithm_state(self):
-        """适配 DataLogger 旧格式"""
+        """适配 DataLogger 旧格式 + GP2 信息"""
         return {
             'exploration_weight': self.exploration_weight,
+            'timeout_exploration_weight': self.timeout_exploration_weight,
             'regime_id': 0, 
             'regime_0_samples': len(self.X_history),
-            'regime_1_samples': 0,
+            'regime_1_samples': len(self.X_timeout_history),
             'regime_2_samples': 0,
             'regime_3_samples': 0
         }
@@ -552,11 +698,17 @@ class BayesianOptimizer(OptimizerBase):
             state = {
                 'X_history': self.X_history,
                 'y_history': self.y_history,
+                'X_timeout_history': self.X_timeout_history,
+                'y_timeout_history': self.y_timeout_history,
                 'exploration_weight': self.exploration_weight,
-                'iteration': self.iteration
+                'timeout_exploration_weight': self.timeout_exploration_weight,
+                'iteration': self.iteration,
+                'timeout_iteration': self.timeout_iteration,
+                'lastD': self.lastD
             }
             joblib.dump(state, self.model_path)
-            print(f"[BO] Model saved to {self.model_path}")
+            print(f"[BO] Model saved to {self.model_path} "
+                  f"(GP1: {len(self.X_history)} samples, GP2: {len(self.X_timeout_history)} samples)")
         except Exception as e:
             print(f"[BO] Failed to save model: {e}")
 
@@ -567,13 +719,21 @@ class BayesianOptimizer(OptimizerBase):
                 state = joblib.load(self.model_path)
                 self.X_history = state.get('X_history', [])
                 self.y_history = state.get('y_history', [])
+                self.X_timeout_history = state.get('X_timeout_history', [])
+                self.y_timeout_history = state.get('y_timeout_history', [])
                 self.exploration_weight = state.get('exploration_weight', 2.0)
+                self.timeout_exploration_weight = state.get('timeout_exploration_weight', 2.0)
                 self.iteration = state.get('iteration', 0)
+                self.timeout_iteration = state.get('timeout_iteration', 0)
+                self.lastD = state.get('lastD', D_values[len(D_values) // 2].item())
                 
                 if len(self.X_history) > 0:
                     self.gp.fit(np.array(self.X_history), np.array(self.y_history))
+                if len(self.X_timeout_history) > 0:
+                    self.gp_timeout.fit(np.array(self.X_timeout_history), np.array(self.y_timeout_history))
                     
-                print(f"[BO] Model loaded. History size: {len(self.X_history)}")
+                print(f"[BO] Model loaded. GP1: {len(self.X_history)} samples, "
+                      f"GP2: {len(self.X_timeout_history)} samples")
             except Exception as e:
                 print(f"[BO] Failed to load model: {e}")
 
@@ -581,15 +741,26 @@ class BayesianOptimizer(OptimizerBase):
         super().reset()
         self.X_history = []
         self.y_history = []
-        self.exploration_weight = 2.0
+        self.X_timeout_history = []
+        self.y_timeout_history = []
+        self.exploration_weight = 1.5
+        self.timeout_exploration_weight = 2.0
         self.pending_experience = None
+        self.pending_timeout_experience = None
+        self.lastD = D_values[len(D_values) // 2].item()
         self.gp = GaussianProcessRegressor(
             kernel=self.gp_kernel,
             alpha=self.gp_alpha,
             normalize_y=True,
             n_restarts_optimizer=self.gp_n_restarts
         )
-        print("[BO] Optimizer reset")
+        self.gp_timeout = GaussianProcessRegressor(
+            kernel=self.gp_timeout_kernel,
+            alpha=self.gp_alpha,
+            normalize_y=True,
+            n_restarts_optimizer=self.gp_n_restarts
+        )
+        print("[BO] Optimizer reset (both GPs)")
 
 class SimulatedAnnealing(OptimizerBase):
     """

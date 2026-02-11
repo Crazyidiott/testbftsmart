@@ -185,21 +185,40 @@ public class ServiceReplica {
     }
 
     /**
-     * Dynamic adjustment of consensus parameters.
+     * Dynamic adjustment of consensus parameters (batch only, backward compatible).
      * 
      * @param maxBatchSize New maximum batch size.
      * @param batchTimeout New batch timeout in milliseconds.
      */
     public void setDynamicConsensusConfig(int maxBatchSize, int batchTimeout) {
+        setDynamicConsensusConfig(maxBatchSize, batchTimeout, -1);
+    }
+
+    /**
+     * Dynamic adjustment of consensus parameters including request timeout.
+     * 
+     * @param maxBatchSize New maximum batch size.
+     * @param batchTimeout New batch timeout in milliseconds.
+     * @param requestTimeout New request timeout (view change trigger) in milliseconds.
+     *                       Pass -1 or 0 to leave unchanged.
+     */
+    public void setDynamicConsensusConfig(int maxBatchSize, int batchTimeout, int requestTimeout) {
         if (this.SVController == null) return;
         
-        logger.info("Updating consensus configuration: maxBatchSize={}, batchTimeout={}", maxBatchSize, batchTimeout);
-        
-        // 1. Update Configuration
+        // 1. Update batch configuration
         this.SVController.getStaticConf().setMaxBatchSize(maxBatchSize);
         this.SVController.getStaticConf().setBatchTimeout(batchTimeout);
         
-        // 2. Notify TOMLayer to restart timer if necessary
+        // 2. Update request timeout if a valid value is provided
+        if (requestTimeout > 0) {
+            logger.info("Updating consensus configuration: maxBatchSize={}, batchTimeout={}, requestTimeout={}",
+                        maxBatchSize, batchTimeout, requestTimeout);
+            this.SVController.getStaticConf().setRequestTimeout(requestTimeout);
+        } else {
+            logger.info("Updating consensus configuration: maxBatchSize={}, batchTimeout={}", maxBatchSize, batchTimeout);
+        }
+        
+        // 3. Notify TOMLayer to restart timers if necessary
         if (this.tomLayer != null) {
             this.tomLayer.onConfigurationChanged();
         }

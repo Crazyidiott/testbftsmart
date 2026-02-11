@@ -22,6 +22,7 @@ message MetricsRequest {
 message MetricsResponse {
     int32 BatchSize = 1;
     int32 BatchTimeout = 2;
+    int32 RequestTimeout = 3;
 }
 
 message Timestamp {

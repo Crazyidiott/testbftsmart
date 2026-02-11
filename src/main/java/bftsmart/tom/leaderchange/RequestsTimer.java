@@ -76,6 +76,20 @@ public class RequestsTimer {
     public void setShortTimeout(long shortTimeout) {
         this.shortTimeout = shortTimeout;
     }
+
+    /**
+     * Dynamically update the request timeout value.
+     * If a timer is currently running, it will be restarted with the new timeout.
+     * @param timeout New timeout in milliseconds.
+     */
+    public void setTimeout(long timeout) {
+        this.timeout = timeout;
+        // Restart the running timer with the new timeout value
+        if (rtTask != null) {
+            stopTimer();
+            startTimer();
+        }
+    }
     
     public void startTimer() {
         if (rtTask == null) {

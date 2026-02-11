@@ -29,7 +29,7 @@ public class TOMConfiguration extends Configuration {
 
     protected int n;
     protected int f;
-    protected int requestTimeout;
+    private volatile int requestTimeout;
     private volatile int batchTimeout;
     protected int tomPeriod;
     protected int paxosHighMark;
@@ -462,6 +462,17 @@ public class TOMConfiguration extends Configuration {
 
     public int getRequestTimeout() {
         return requestTimeout;
+    }
+
+    /**
+     * Dynamically set the request timeout (view change trigger timeout).
+     * Enforces safety bounds: [500ms, 30000ms].
+     * @param requestTimeout New timeout in milliseconds.
+     */
+    public void setRequestTimeout(int requestTimeout) {
+        if (requestTimeout < 500) requestTimeout = 500;
+        if (requestTimeout > 30000) requestTimeout = 30000;
+        this.requestTimeout = requestTimeout;
     }
 
     public int getBatchTimeout() {
