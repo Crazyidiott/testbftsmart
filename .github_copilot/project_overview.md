@@ -337,7 +337,7 @@ Node 4 (Client)  : 172.31.13.125
                   │  batchSize / batchTimeout                    │
                   │  → 本地 volatile 写入，直接生效（无需共识）       │
                   │                                              │
-                  │  requestTimeout（每 10s，仅 replica 0 提交）  │
+                  │  requestTimeout（每 10s，仅当前 PBFT leader 提交）│
                   │  → configProxy.invokeOrdered(ConfigChange)  │
                   │    ↓ 与普通请求交织，走同一 PBFT 共识流水线      │
                   │    ↓ 所有副本在同一 appExecuteBatch 交付点应用  │
@@ -353,19 +353,22 @@ Node 4 (Client)  : 172.31.13.125
 
 **共识参数（requestTimeout）**：
 - `requestTimeout` 决定每个副本何时认为 leader 超时并触发 leader change；若各副本值不同，会导致部分副本提前触发视图变更，破坏协议活性
-- 由 **replica 0（固定 Config Proposer）** 每 10s 通过 `configProxy.invokeOrdered()` 提交一次
+- 由**当前 PBFT consensus leader** 每 10s 通过 `configProxy.invokeOrdered()` 提交一次（每个副本检查 `serviceReplica.getCurrentLeader()` == 自身 ID，仅 leader 提交）
+- `configProxy` 在首次成为 leader 时懒初始化（clientId=4999，所有副本均可），避免资源浪费
 - 该请求以 8 字节魔数`0xBF434647`开头，在 `appExecuteBatch` 中被识别为参数共识请求
 - **不会暂停普通共识**：config-change 与普通业务请求共享同一 PBFT 排序流水线，可在同一批次中混合处理
 - 所有副本在**同一共识交付点**原子应用新值，保证全局一致
 
-**Leader Change 与 Config Proposer 的独立性**：
+**Config Proposer 角色跟随 PBFT Leader**：
 
 | 角色 | 绑定 | Leader Change 影响 |
-|------|------|--------------------|
+|------|------|-----------------|
 | PBFT Leader（Proposer）| 当前 regency 的 leader，随 leader change 变化 | 变化 |
-| Config Proposer | 硬编码为 replica 0 的 RLAgentConnector | **不受影响** |
+| Config Proposer | **动态绑定到当前 PBFT leader**（`serviceReplica.getCurrentLeader()`） | **同步变化** |
 
-Leader change 到 replica 1 后，replica 1 负责提案（PROPOSE），而 replica 0 的 `configProxy` 仍向所有副本广播 config-change 请求，新 leader 正常将其打包进批次。唯一失效场景是 replica 0 本身宕机，此时 requestTimeout 更新暂停，系统以最后一次共识值继续运行。
+Leader change 后，新 leader 的 `RLAgentConnector` 在下一个 10s 滴答时检测到 `replicaId == getCurrentLeader()` 为真，自动承担 Config Proposer 职责；旧 leader 检测到自己不再是 leader，跳过提交。`configProxy` 采用懒初始化，首次成为 leader 时才创建 ServiceProxy，避免全部副本同时持有连接。
+
+**唯一暂停窗口**：leader change 协议执行期间（旧 leader 挂起、新 leader 尚未当选），config 提交暂停；选主完成后在下一个滴答自动恢复，最大延迟等于一次 `REQUEST_TIMEOUT_UPDATE_INTERVAL`（10s）+ 选主时延。
 
 ---
 

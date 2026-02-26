@@ -606,4 +606,21 @@ public class ServiceReplica {
     public int getId() {
         return id;
     }
+
+    /**
+     * Returns the ID of the current PBFT consensus leader.
+     *
+     * <p>This is used by components such as {@code RLAgentConnector} to determine
+     * whether this replica should act as the <em>Config Proposer</em> (the replica
+     * responsible for submitting consensus-agreed configuration changes via
+     * {@code invokeOrdered}).  By tying this role to the current consensus leader,
+     * the system remains functional after any number of leader changes: whoever
+     * becomes the new leader automatically takes over config-proposal duties.
+     *
+     * @return Current leader replica ID, or -1 if the TOM layer is not yet initialised.
+     */
+    public int getCurrentLeader() {
+        if (tomLayer == null || tomLayer.execManager == null) return -1;
+        return tomLayer.execManager.getCurrentLeader();
+    }
 }

@@ -20,10 +20,23 @@ import io.grpc.StatusRuntimeException;
  *       may apply these independently; inconsistency does not break the protocol.</li>
  *   <li><b>Consensus parameters</b> ({@code requestTimeout}): all replicas must agree
  *       on the same value so that they trigger a leader-change at the same moment.
- *       These are applied via {@link ConfigChangeRequest}: only replica 0 submits an
- *       {@code invokeOrdered} proposal; all replicas (including 0) apply the value
- *       when the ordered request is delivered by the consensus engine.</li>
+ *       These are applied via {@link ConfigChangeRequest}: only the <em>current PBFT
+ *       consensus leader</em> submits an {@code invokeOrdered} proposal; all replicas
+ *       (including the leader) apply the value when the ordered request is delivered
+ *       by the consensus engine.</li>
  * </ul>
+ *
+ * <h3>Config Proposer role follows the PBFT leader</h3>
+ * <p>Every replica runs its own {@code RLAgentConnector} monitoring loop.
+ * At each {@link #REQUEST_TIMEOUT_UPDATE_INTERVAL} tick, the loop checks whether
+ * this replica is currently the consensus leader ({@code serviceReplica.getCurrentLeader()}).
+ * Only the leader submits the {@code invokeOrdered} config-change request.
+ * After a leader change, the new leader's monitoring loop will start proposing
+ * on its next scheduled tick – no special coordination is required.
+ * <p>The only edge case where requestTimeout updates pause is when the current leader
+ * is genuinely faulty (crashed/Byzantine) and no new leader has yet been elected;
+ * once the leader-change protocol completes and a new leader is established,
+ * updates resume automatically.
  */
 public class RLAgentConnector {
 
@@ -32,16 +45,17 @@ public class RLAgentConnector {
     private final ServiceReplica serviceReplica;
     private final ThroughputLatencyServer serverInstance;
 
-    /** Replica ID obtained from ServiceReplica – used to designate the config proposer. */
+    /** Replica ID obtained from ServiceReplica. */
     private final int replicaId;
 
     private ManagedChannel channel;
     private MetricsServiceGrpc.MetricsServiceBlockingStub blockingStub;
 
     /**
-     * Internal ServiceProxy used ONLY on replica 0 to submit consensus-agreed
-     * config-change requests.  Client ID 4999 is reserved for this purpose and
-     * must not be used by real benchmark clients.
+     * Internal ServiceProxy used by whichever replica is currently the PBFT leader
+     * to submit consensus-agreed config-change requests.  Initialised lazily when
+     * this replica first becomes the leader.
+     * Client ID 4999 is reserved for this purpose and must not be used by benchmark clients.
      */
     private ServiceProxy configProxy = null;
     private static final int CONFIG_PROXY_CLIENT_ID = 4999;
@@ -121,30 +135,45 @@ public class RLAgentConnector {
     }
 
     /**
+     * Returns {@code true} if this replica is currently the PBFT consensus leader.
+     *
+     * <p>The Config Proposer role follows the leader: whichever replica is the
+     * current leader is responsible for submitting {@code requestTimeout} updates
+     * via consensus.  This ensures the role survives any number of leader changes.
+     */
+    private boolean isCurrentLeader() {
+        return replicaId == serviceReplica.getCurrentLeader();
+    }
+
+    /**
+     * Lazily initialises the internal {@link ServiceProxy} used for consensus-agreed
+     * config changes.  Called the first time this replica becomes the leader.
+     */
+    private void ensureConfigProxyInitialised() {
+        if (configProxy != null) return;
+        try {
+            configProxy = new ServiceProxy(CONFIG_PROXY_CLIENT_ID);
+            logger.info("[ConfigProxy] Replica {} (now leader): internal ServiceProxy initialised "
+                    + "(clientId={}) for consensus-agreed config changes.", replicaId, CONFIG_PROXY_CLIENT_ID);
+        } catch (Exception e) {
+            logger.error("[ConfigProxy] Replica {}: failed to initialise internal ServiceProxy – "
+                    + "requestTimeout updates via consensus will be disabled.", replicaId, e);
+        }
+    }
+
+    /**
      * Main loop for monitoring and tuning.
      *
-     * <p>If this is replica 0, an internal {@link ServiceProxy} is created to submit
-     * consensus-agreed config-change requests.  Other replicas skip that step – they
-     * will apply the change when consensus delivers the ordered request.
+     * <p>Every replica runs this loop.  At each tick the loop checks whether this
+     * replica is the current consensus leader; only the leader submits consensus-agreed
+     * config-change requests.  After a leader change the new leader picks up the role
+     * automatically on its next scheduled tick.
      */
     public void startMonitoringLoop() {
         if (!connected) return;
 
-        // ── Initialise the config proxy on replica 0 only ────────────────────
-        if (replicaId == 0) {
-            try {
-                configProxy = new ServiceProxy(CONFIG_PROXY_CLIENT_ID);
-                logger.info("[ConfigProxy] Replica 0: internal ServiceProxy initialised "
-                        + "(clientId={}) for consensus-agreed config changes.", CONFIG_PROXY_CLIENT_ID);
-            } catch (Exception e) {
-                logger.error("[ConfigProxy] Failed to initialise internal ServiceProxy – "
-                        + "requestTimeout updates via consensus will be disabled.", e);
-                configProxy = null;
-            }
-        } else {
-            logger.info("[ConfigProxy] Replica {}: not the config proposer. "
-                    + "requestTimeout updates will be received via consensus delivery.", replicaId);
-        }
+        logger.info("[ConfigProxy] Replica {}: monitoring loop started. "
+                + "Will act as Config Proposer whenever this replica is the consensus leader.", replicaId);
 
         logger.info("Starting RL Agent Monitoring Loop...");
         logger.info("Warming up for {} ms...", WARMUP_TIME_MS);
@@ -219,16 +248,23 @@ public class RLAgentConnector {
                     serviceReplica.setDynamicConsensusConfig(newBatchSize, newBatchTimeout);
 
                     // ── Consensus parameter: requestTimeout ───────────────────────────
-                    // Only replica 0 submits the proposal.  All replicas (incl. 0) apply
-                    // the value when the ordered request is delivered by consensus.
+                    // Only the CURRENT consensus leader submits the proposal.
+                    // After a leader change, the new leader takes over automatically.
+                    // All replicas (including the proposer) apply the value when the
+                    // ordered request is delivered via appExecuteBatch().
                     if (newRequestTimeout > 0
                             && monitorLoopCounter % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0) {
 
-                        if (replicaId == 0) {
+                        if (isCurrentLeader()) {
+                            ensureConfigProxyInitialised();
                             proposeRequestTimeoutViaConsensus(newRequestTimeout);
+                        } else {
+                            logger.debug("[ConfigProxy] Replica {} is not the leader (leader={}); "
+                                    + "skipping requestTimeout proposal.",
+                                    replicaId, serviceReplica.getCurrentLeader());
                         }
-                        // Non-leader replicas do nothing here; they receive the update
-                        // through the consensus delivery path in appExecuteBatch().
+                        // Non-leader replicas receive the update through the consensus
+                        // delivery path in appExecuteBatch() – no action needed here.
                     }
                 }
 
