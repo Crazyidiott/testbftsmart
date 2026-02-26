@@ -9,6 +9,7 @@ import bftsmart.tom.ServiceReplica;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Connects a replica to the Python RL/Bayesian optimisation agent and applies
@@ -62,6 +63,15 @@ public class RLAgentConnector {
 
     /** Tracks the last requestTimeout value proposed via consensus to avoid duplicates. */
     private volatile int lastProposedRequestTimeout = -1;
+
+    /**
+     * Guards concurrent requestTimeout proposals.  Set to {@code true} when an
+     * {@code invokeOrdered} call is in-flight; reset to {@code false} when it
+     * completes (success or failure).  Prevents the monitoring loop thread from
+     * being blocked by consensus I/O and avoids stacking duplicate proposals
+     * during slow consensus rounds (e.g. leader-change recovery).
+     */
+    private final AtomicBoolean proposalInFlight = new AtomicBoolean(false);
 
     private boolean connected = false;
 
@@ -297,7 +307,22 @@ public class RLAgentConnector {
 
                         if (isCurrentLeader()) {
                             ensureConfigProxyInitialised();
-                            proposeRequestTimeoutViaConsensus(newRequestTimeout);
+                            // Fire invokeOrdered on a daemon thread so the monitoring loop
+                            // is never blocked by consensus I/O (e.g. during leader change).
+                            // proposalInFlight prevents concurrent duplicate proposals.
+                            if (!proposalInFlight.get()) {
+                                final int timeoutToPropose = newRequestTimeout;
+                                proposalInFlight.set(true);  // set BEFORE start to close the race window
+                                Thread proposalThread = new Thread(
+                                    () -> proposeRequestTimeoutViaConsensus(timeoutToPropose));
+                                proposalThread.setDaemon(true);
+                                proposalThread.setName("ConfigProposal-RT-" + timeoutToPropose);
+                                proposalThread.start();
+                            } else {
+                                logger.debug("[ConfigProxy] Replica {}: previous proposal still in-flight, "
+                                        + "skipping requestTimeout={} this tick.",
+                                        replicaId, newRequestTimeout);
+                            }
                         } else {
                             logger.debug("[ConfigProxy] Replica {} is not the leader (leader={}); "
                                     + "skipping requestTimeout proposal.",
@@ -338,18 +363,20 @@ public class RLAgentConnector {
      * @param newRequestTimeout Proposed new value in milliseconds.
      */
     private void proposeRequestTimeoutViaConsensus(int newRequestTimeout) {
-        if (configProxy == null) {
-            logger.warn("[ConfigProxy] configProxy is null – cannot propose requestTimeout={}", newRequestTimeout);
-            return;
-        }
-
-        // Avoid re-proposing the same value that was already submitted
-        if (newRequestTimeout == lastProposedRequestTimeout) {
-            logger.debug("[ConfigProxy] requestTimeout={} already proposed, skipping duplicate.", newRequestTimeout);
-            return;
-        }
-
+        // proposalInFlight was set to true by the monitoring loop before starting
+        // this thread; always reset it on exit so future proposals are not blocked.
         try {
+            if (configProxy == null) {
+                logger.warn("[ConfigProxy] configProxy is null – cannot propose requestTimeout={}", newRequestTimeout);
+                return;
+            }
+
+            // Avoid re-proposing the same value that was already submitted
+            if (newRequestTimeout == lastProposedRequestTimeout) {
+                logger.debug("[ConfigProxy] requestTimeout={} already proposed, skipping duplicate.", newRequestTimeout);
+                return;
+            }
+
             logger.info("[ConfigProxy] Replica 0 proposing consensus config change: requestTimeout={}",
                     newRequestTimeout);
 
@@ -367,5 +394,7 @@ public class RLAgentConnector {
         } catch (Exception e) {
             logger.error("[ConfigProxy] Failed to submit requestTimeout={} via consensus: {}",
                     newRequestTimeout, e.getMessage(), e);
+        } finally {
+            proposalInFlight.set(false);
         }
     }}
