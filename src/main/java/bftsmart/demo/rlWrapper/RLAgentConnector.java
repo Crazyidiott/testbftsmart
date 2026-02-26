@@ -4,38 +4,75 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import bftsmart.demo.microbenchmarks.ThroughputLatencyServer;
+import bftsmart.tom.ServiceProxy;
 import bftsmart.tom.ServiceReplica;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
 
+/**
+ * Connects a replica to the Python RL/Bayesian optimisation agent and applies
+ * the resulting parameter recommendations.
+ *
+ * <h3>Parameter classification</h3>
+ * <ul>
+ *   <li><b>Local parameters</b> ({@code batchSize}, {@code batchTimeout}): each replica
+ *       may apply these independently; inconsistency does not break the protocol.</li>
+ *   <li><b>Consensus parameters</b> ({@code requestTimeout}): all replicas must agree
+ *       on the same value so that they trigger a leader-change at the same moment.
+ *       These are applied via {@link ConfigChangeRequest}: only replica 0 submits an
+ *       {@code invokeOrdered} proposal; all replicas (including 0) apply the value
+ *       when the ordered request is delivered by the consensus engine.</li>
+ * </ul>
+ */
 public class RLAgentConnector {
 
     private final Logger logger = LoggerFactory.getLogger(this.getClass());
 
     private final ServiceReplica serviceReplica;
     private final ThroughputLatencyServer serverInstance;
-    
+
+    /** Replica ID obtained from ServiceReplica – used to designate the config proposer. */
+    private final int replicaId;
+
     private ManagedChannel channel;
     private MetricsServiceGrpc.MetricsServiceBlockingStub blockingStub;
-    
+
+    /**
+     * Internal ServiceProxy used ONLY on replica 0 to submit consensus-agreed
+     * config-change requests.  Client ID 4999 is reserved for this purpose and
+     * must not be used by real benchmark clients.
+     */
+    private ServiceProxy configProxy = null;
+    private static final int CONFIG_PROXY_CLIENT_ID = 4999;
+
+    /** Tracks the last requestTimeout value proposed via consensus to avoid duplicates. */
+    private volatile int lastProposedRequestTimeout = -1;
+
     private boolean connected = false;
 
-    // Configuration
-    // Warmup should be longer than:
-    // 1. lan_deploy.sh's "sleep 10" before client starts (10s)
-    // 2. Client's rampup phase (3000ms / 100ms per request = ~30 requests * 10 clients)
-    // Total: ~40-45 seconds for system to reach steady state
-    private static final int WARMUP_TIME_MS = 10000; // 10s warmup
-    private static final int MONITOR_INTERVAL_MS = 1000; // 1s interval
-    // Request timeout is adjusted less frequently than batch params to avoid system oscillation.
-    // Update every 10 monitoring intervals = every 10 seconds.
-    private static final int REQUEST_TIMEOUT_UPDATE_INTERVAL = 10;
+    // ── Timing constants ──────────────────────────────────────────────────────
+
+    /** Warmup period before the first metrics transmission. */
+    private static final int WARMUP_TIME_MS = 10000;       // 10 s
+
+    /** Metrics collection and parameter-update interval. */
+    private static final int MONITOR_INTERVAL_MS = 1000;   // 1 s
+
+    /**
+     * requestTimeout is updated every N monitoring intervals to avoid view-change
+     * oscillation caused by rapidly changing the leader-failover timer.
+     */
+    private static final int REQUEST_TIMEOUT_UPDATE_INTERVAL = 10; // every 10 s
+
     private int monitorLoopCounter = 0;
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     public RLAgentConnector(ServiceReplica serviceReplica, ThroughputLatencyServer serverInstance) {
         this.serviceReplica = serviceReplica;
         this.serverInstance = serverInstance;
+        this.replicaId = serviceReplica.getId();
     }
 
     /**
@@ -85,12 +122,32 @@ public class RLAgentConnector {
 
     /**
      * Main loop for monitoring and tuning.
+     *
+     * <p>If this is replica 0, an internal {@link ServiceProxy} is created to submit
+     * consensus-agreed config-change requests.  Other replicas skip that step – they
+     * will apply the change when consensus delivers the ordered request.
      */
     public void startMonitoringLoop() {
         if (!connected) return;
 
+        // ── Initialise the config proxy on replica 0 only ────────────────────
+        if (replicaId == 0) {
+            try {
+                configProxy = new ServiceProxy(CONFIG_PROXY_CLIENT_ID);
+                logger.info("[ConfigProxy] Replica 0: internal ServiceProxy initialised "
+                        + "(clientId={}) for consensus-agreed config changes.", CONFIG_PROXY_CLIENT_ID);
+            } catch (Exception e) {
+                logger.error("[ConfigProxy] Failed to initialise internal ServiceProxy – "
+                        + "requestTimeout updates via consensus will be disabled.", e);
+                configProxy = null;
+            }
+        } else {
+            logger.info("[ConfigProxy] Replica {}: not the config proposer. "
+                    + "requestTimeout updates will be received via consensus delivery.", replicaId);
+        }
+
         logger.info("Starting RL Agent Monitoring Loop...");
-        logger.info("Warming up for " + WARMUP_TIME_MS + "ms...");
+        logger.info("Warming up for {} ms...", WARMUP_TIME_MS);
 
         try {
             Thread.sleep(WARMUP_TIME_MS);
@@ -150,24 +207,33 @@ public class RLAgentConnector {
                 // 3. Send RPC
                 MonitorProto.MetricsResponse response = blockingStub.sendMetrics(request);
 
-                // 4. Apply Tuning (if response is valid)
-                int newBatchSize = response.getBatchSize();
+                // 4. Apply Tuning
+                int newBatchSize    = response.getBatchSize();
                 int newBatchTimeout = response.getBatchTimeout();
                 int newRequestTimeout = response.getRequestTimeout();
-                
+
                 if (newBatchSize > 0 && newBatchTimeout >= -1) {
                     monitorLoopCounter++;
-                    // Request timeout is updated less frequently to avoid oscillation
-                    if (newRequestTimeout > 0 && (monitorLoopCounter % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0)) {
-                        serviceReplica.setDynamicConsensusConfig(newBatchSize, newBatchTimeout, newRequestTimeout);
-                    } else {
-                        serviceReplica.setDynamicConsensusConfig(newBatchSize, newBatchTimeout);
+
+                    // ── Local parameters: apply directly, no consensus needed ─────────
+                    serviceReplica.setDynamicConsensusConfig(newBatchSize, newBatchTimeout);
+
+                    // ── Consensus parameter: requestTimeout ───────────────────────────
+                    // Only replica 0 submits the proposal.  All replicas (incl. 0) apply
+                    // the value when the ordered request is delivered by consensus.
+                    if (newRequestTimeout > 0
+                            && monitorLoopCounter % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0) {
+
+                        if (replicaId == 0) {
+                            proposeRequestTimeoutViaConsensus(newRequestTimeout);
+                        }
+                        // Non-leader replicas do nothing here; they receive the update
+                        // through the consensus delivery path in appExecuteBatch().
                     }
                 }
 
             } catch (StatusRuntimeException e) {
                 logger.error("RPC failed: " + e.getStatus());
-                // Decide whether to break or retry. For now, we continue but might need re-connection logic.
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;
@@ -179,5 +245,51 @@ public class RLAgentConnector {
         if (channel != null) {
             channel.shutdown();
         }
+        if (configProxy != null) {
+            configProxy.close();
+        }
     }
-}
+
+    /**
+     * Submits a consensus-agreed {@code requestTimeout} update (replica 0 only).
+     *
+     * <p>The request is encoded with a magic prefix (see {@link ConfigChangeRequest}) and
+     * sent as a normal BFT-ordered request via the internal {@link ServiceProxy}.
+     * All replicas – including replica 0 itself – will apply the new value when the
+     * ordered request is delivered by the consensus engine (in
+     * {@code ThroughputLatencyServer.appExecuteBatch}).
+     *
+     * @param newRequestTimeout Proposed new value in milliseconds.
+     */
+    private void proposeRequestTimeoutViaConsensus(int newRequestTimeout) {
+        if (configProxy == null) {
+            logger.warn("[ConfigProxy] configProxy is null – cannot propose requestTimeout={}", newRequestTimeout);
+            return;
+        }
+
+        // Avoid re-proposing the same value that was already submitted
+        if (newRequestTimeout == lastProposedRequestTimeout) {
+            logger.debug("[ConfigProxy] requestTimeout={} already proposed, skipping duplicate.", newRequestTimeout);
+            return;
+        }
+
+        try {
+            logger.info("[ConfigProxy] Replica 0 proposing consensus config change: requestTimeout={}",
+                    newRequestTimeout);
+
+            byte[] payload = ConfigChangeRequest.encode(
+                    ConfigChangeRequest.TYPE_REQUEST_TIMEOUT, newRequestTimeout);
+
+            // invokeOrdered blocks until f+1 replicas have confirmed the result.
+            // The request goes through BFT consensus, so ALL correct replicas deliver it.
+            byte[] ack = configProxy.invokeOrdered(payload);
+
+            lastProposedRequestTimeout = newRequestTimeout;
+            logger.info("[ConfigProxy] Consensus proposal for requestTimeout={} submitted successfully "
+                    + "(ACK length={}).", newRequestTimeout, ack != null ? ack.length : 0);
+
+        } catch (Exception e) {
+            logger.error("[ConfigProxy] Failed to submit requestTimeout={} via consensus: {}",
+                    newRequestTimeout, e.getMessage(), e);
+        }
+    }}

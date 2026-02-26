@@ -35,11 +35,10 @@ ALGORITHMS=("BAYESIAN" "PPO")
 # 要测试的静态配置列表 (batch_size, batch_timeout)
 # 你可以根据静态实验的结果，选择一些有代表性的配置
 STATIC_CONFIGS=(
-    "100,50"      # 小 batch, 短 timeout (低延迟配置)
-    "500,100"     # 中等配置
-    "1000,150"    # 大 batch, 中等 timeout
-    "2000,200"    # 大 batch, 长 timeout (高吞吐配置)
-    "300,80"      # 另一个中等配置
+    "2000,200"   # HIGH-optimal（大批次大超时）：LOW 阶段延迟严重
+    "100,10"     # LOW-optimal（小批次小超时）：HIGH 阶段吞吐受限
+    "500,50"     # 折中配置：两个阶段都不完美
+    "2000,50"    # 大批次短超时：HIGH 良好，LOW 延迟中等（作为"伪折中"对照）
 )
 
 # 是否跳过编译

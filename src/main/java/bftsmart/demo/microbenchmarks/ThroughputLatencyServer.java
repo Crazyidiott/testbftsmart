@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import bftsmart.demo.rlWrapper.ConfigChangeRequest;
 import bftsmart.demo.rlWrapper.RLAgentConnector;
 import bftsmart.tom.MessageContext;
 import bftsmart.tom.ServiceReplica;
@@ -258,6 +259,10 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         }
     }
     
+    // Logger for appExecuteBatch (re-uses the class-level java.util.logging.Logger already imported)
+    private static final org.slf4j.Logger batchLogger =
+            org.slf4j.LoggerFactory.getLogger(ThroughputLatencyServer.class);
+
     @Override
     public byte[][] appExecuteBatch(byte[][] commands, MessageContext[] msgCtxs, boolean fromConsensus) {
         
@@ -266,7 +271,29 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         byte[][] replies = new byte[commands.length][];
         
         for (int i = 0; i < commands.length; i++) {
-            
+
+            // ── Consensus-agreed config change ───────────────────────────────
+            // A ConfigChangeRequest payload is submitted via invokeOrdered by replica 0
+            // and delivered here on ALL replicas at the same consensus point, guaranteeing
+            // that every correct replica applies the new parameter simultaneously.
+            if (ConfigChangeRequest.isConfigChange(commands[i])) {
+                try {
+                    int[] decoded = ConfigChangeRequest.decode(commands[i]);
+                    if (decoded[0] == ConfigChangeRequest.TYPE_REQUEST_TIMEOUT) {
+                        batchLogger.info("[ConsensusConfig] Delivering requestTimeout={} on replica {}",
+                                decoded[1], replica.getId());
+                        replica.applyConsensusRequestTimeout(decoded[1]);
+                    } else {
+                        batchLogger.warn("[ConsensusConfig] Unknown config type {} – ignored.", decoded[0]);
+                    }
+                } catch (Exception e) {
+                    batchLogger.error("[ConsensusConfig] Error processing config-change payload", e);
+                }
+                replies[i] = new byte[0]; // empty ACK to satisfy the proposer's invokeOrdered
+                continue;
+            }
+            // ────────────────────────────────────────────────────────────────
+
             replies[i] = execute(commands[i],msgCtxs[i]);
             
         }

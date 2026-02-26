@@ -196,29 +196,65 @@ public class ServiceReplica {
 
     /**
      * Dynamic adjustment of consensus parameters including request timeout.
-     * 
-     * @param maxBatchSize New maximum batch size.
-     * @param batchTimeout New batch timeout in milliseconds.
-     * @param requestTimeout New request timeout (view change trigger) in milliseconds.
-     *                       Pass -1 or 0 to leave unchanged.
+     *
+     * <p><b>NOTE:</b> The {@code requestTimeout} argument is intentionally ignored here.
+     * {@code requestTimeout} must be consistent across ALL replicas (it controls when
+     * replicas trigger a leader-change).  Applying it with a simple local write could
+     * cause replicas to disagree on when to start a view-change.  Instead, submit a
+     * config-change request via {@code ServiceProxy.invokeOrdered()} and apply it through
+     * {@link #applyConsensusRequestTimeout(int)}, which is called for every replica
+     * simultaneously at the same BFT-ordered delivery point.
+     *
+     * @param maxBatchSize   New maximum batch size (locally applied, no consensus needed).
+     * @param batchTimeout   New batch timeout in ms (locally applied, no consensus needed).
+     * @param requestTimeout Ignored – use the consensus path instead (see above).
      */
     public void setDynamicConsensusConfig(int maxBatchSize, int batchTimeout, int requestTimeout) {
         if (this.SVController == null) return;
-        
-        // 1. Update batch configuration
+
+        // Update locally-tunable batch parameters
         this.SVController.getStaticConf().setMaxBatchSize(maxBatchSize);
         this.SVController.getStaticConf().setBatchTimeout(batchTimeout);
-        
-        // 2. Update request timeout if a valid value is provided
-        if (requestTimeout > 0) {
-            logger.info("Updating consensus configuration: maxBatchSize={}, batchTimeout={}, requestTimeout={}",
-                        maxBatchSize, batchTimeout, requestTimeout);
-            this.SVController.getStaticConf().setRequestTimeout(requestTimeout);
-        } else {
-            logger.info("Updating consensus configuration: maxBatchSize={}, batchTimeout={}", maxBatchSize, batchTimeout);
+
+        logger.info("Updating local batch config: maxBatchSize={}, batchTimeout={}", maxBatchSize, batchTimeout);
+
+        // Notify TOMLayer to restart the batch timer if necessary
+        if (this.tomLayer != null) {
+            this.tomLayer.onConfigurationChanged();
         }
-        
-        // 3. Notify TOMLayer to restart timers if necessary
+
+        // requestTimeout is intentionally NOT applied here.
+        // It must go through BFT consensus (see applyConsensusRequestTimeout).
+        if (requestTimeout > 0) {
+            logger.warn("setDynamicConsensusConfig: requestTimeout={} was passed but IGNORED. "
+                    + "Use the consensus-based config-change path (ConfigChangeRequest) instead.", requestTimeout);
+        }
+    }
+
+    /**
+     * Applies a consensus-agreed {@code requestTimeout} update.
+     *
+     * <p>This method is called by the application executor ({@code ThroughputLatencyServer})
+     * when it delivers a {@code ConfigChangeRequest} payload that has been ordered and
+     * agreed upon by quorum.  Because every replica processes the same ordered log, all
+     * replicas invoke this method at the identical consensus delivery point, guaranteeing
+     * a consistent timeout value across the cluster.
+     *
+     * <p>This is the ONLY correct way to change {@code requestTimeout} at runtime.
+     *
+     * @param requestTimeout New view-change trigger timeout in milliseconds (must be &gt; 0).
+     */
+    public void applyConsensusRequestTimeout(int requestTimeout) {
+        if (this.SVController == null) return;
+        if (requestTimeout <= 0) {
+            logger.warn("applyConsensusRequestTimeout: invalid value {} – ignored", requestTimeout);
+            return;
+        }
+
+        this.SVController.getStaticConf().setRequestTimeout(requestTimeout);
+        logger.info("[Consensus Config] requestTimeout applied to {} ms on replica {}", requestTimeout, id);
+
+        // Notify TOMLayer so the RequestsTimer picks up the new value
         if (this.tomLayer != null) {
             this.tomLayer.onConfigurationChanged();
         }
