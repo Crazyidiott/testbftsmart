@@ -130,8 +130,8 @@ print(f"[Config]   RequestTimeout: {D_values.min().item()} - {D_values.max().ite
 # 基于实际观测数据设置：
 # - 吞吐量: 40,000 - 60,000 ops/s (正常运行时)
 # - 延迟: 10,000 - 30,000 微秒 (10-30ms)
-THROUGHPUT_SCALE = 10000.0   # 预期最大吞吐量约 10k ops/s
-LATENCY_SCALE = 5000.0       # 预期最大延迟约 50ms = 50,000 微秒
+THROUGHPUT_SCALE = 60000.0   # 预期最大吞吐量约 60k ops/s (对应实际观测范围 40k-60k)
+LATENCY_SCALE = 30000.0      # 预期最大延迟约 30ms = 30,000 微秒 (对应实际观测范围 10k-30k µs)
 REWARD_SCALE = 100000.0       # Reward 归一化因子
 
 # Reward 权重 (吞吐量最大化，延迟最小化)
@@ -160,13 +160,13 @@ def Normalized(state):
     state: [throughput, latency, payload, tot_thr, tot_lat, tot_size, arrival_rate]
     """
     max_vals = np.array([
-        THROUGHPUT_SCALE,    # throughput: 100k ops/s
-        LATENCY_SCALE,       # latency: 50k 微秒 = 50ms  
-        10000.0,             # payload: 10KB
-        1e9,                 # tot_thr: 累计值，使用大值
-        1e9,                 # tot_lat: 累计值，使用大值
-        1e9,                 # tot_size: 累计值，使用大值
-        THROUGHPUT_SCALE,    # arrival_rate: 与吞吐量同量级
+        THROUGHPUT_SCALE,    # index 0: throughput (每窗口 ops/s，上限 ~60k)
+        LATENCY_SCALE,       # index 1: latency (每窗口平均延迟 µs，上限 ~30ms)
+        10000.0,             # index 2: payload (每消息平均字节，上限 ~10KB)
+        1e9,                 # index 3: tot_thr (累计完成 ops 数，随实验时间增长)
+        LATENCY_SCALE,       # index 4: tot_lat (EMA 平滑延迟 µs，单位与 latency 相同)
+        1e9,                 # index 5: tot_size (累计消息字节数 KB，随实验时间增长)
+        THROUGHPUT_SCALE,    # index 6: arrival_rate (到达率 req/s，同吞吐量量级)
     ])
     return state / (max_vals[:len(state)] + 1e-8)
 
@@ -527,6 +527,11 @@ class BayesianOptimizer(OptimizerBase):
 
     def modelUpdate(self, batch_state, option):
         self.iteration += 1
+        # timeout_iteration 在每次 modelUpdate 调用时递增（含冷启动），
+        # 保证与 Java 侧 monitorLoopCounter 的推进完全同步，
+        # 使两侧 % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0 在同一轮触发。
+        self.timeout_iteration += 1
+        should_update_timeout = (self.timeout_iteration % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0)
         
         # ============ Option 2: 处理 C 参数 ============
         if option == 2:
@@ -537,7 +542,7 @@ class BayesianOptimizer(OptimizerBase):
             
         # ============ Option 1: 处理 Batch + RequestTimeout 参数 ============
         
-        # --- 1. 冷启动逻辑 (Time Alignment Fix) ---
+        # --- 1. 冷启动逻辑 ---
         if len(self.old_state) == 0:
             self.old_state = batch_state
             self.lastO = option
@@ -590,9 +595,7 @@ class BayesianOptimizer(OptimizerBase):
                     print(f"[BO] GP1 fit error: {e}")
 
         # --- 5. GP2 经验记录 (每 10 步) ---
-        self.timeout_iteration += 1
-        should_update_timeout = (self.timeout_iteration % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0)
-        
+        # (timeout_iteration 和 should_update_timeout 已在函数顶部计算)
         if should_update_timeout and self.timeout_reward_count > 0:
             avg_timeout_reward = self.timeout_reward_accumulator / self.timeout_reward_count
             
@@ -1260,7 +1263,12 @@ class PPO(nn.Module, OptimizerBase):
 
     def modelUpdate(self, batch_state, option):
         """PPO 双频率更新逻辑"""
-        
+        # timeout_iteration 在每次 modelUpdate 调用时递增（含冷启动），
+        # 保证与 Java 侧 monitorLoopCounter 的推进完全同步，
+        # 使两侧 % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0 在同一轮触发。
+        self.timeout_iteration += 1
+        should_update_timeout = (self.timeout_iteration % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0)
+
         # 使用动作空间的中间值作为初始参数
         initial_batch = A_values[len(A_values) // 2].item()
         initial_timeout = B_values[len(B_values) // 2].item()
@@ -1312,9 +1320,7 @@ class PPO(nn.Module, OptimizerBase):
         self.lastO = option
 
         # --- Timeout 双频率逻辑 ---
-        self.timeout_iteration += 1
-        should_update_timeout = (self.timeout_iteration % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0)
-        
+        # (timeout_iteration 和 should_update_timeout 已在函数顶部计算)
         if should_update_timeout and self.timeout_reward_count > 0:
             avg_reward = self.timeout_reward_accumulator / self.timeout_reward_count
             

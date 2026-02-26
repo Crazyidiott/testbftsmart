@@ -80,8 +80,27 @@ public class RLAgentConnector {
     private static final int REQUEST_TIMEOUT_UPDATE_INTERVAL = 10; // every 10 s
 
     private int monitorLoopCounter = 0;
+    // ── Cumulative / smoothed state variables for tot_thr / tot_lat / tot_size ──────────
+    /**
+     * Cumulative completed-operations count since the monitoring loop started.
+     * Sent as {@code tot_thr} to the Python agent (normalised with 1e9 on the Python side).
+     * int32-safe for experiments up to ~35 000 s at 60 k ops/s.
+     */
+    private long cumulativeOps = 0;
 
-    // ─────────────────────────────────────────────────────────────────────────
+    /**
+     * Exponentially-weighted moving average of per-window latency (µs), α = 0.2.
+     * Provides a smoothed / longer-horizon signal compared to the raw per-window value.
+     * Sent as {@code tot_lat}; same unit (µs) as the {@code latency} field.
+     */
+    private double smoothedLatencyUs = 0.0;
+
+    /**
+     * Cumulative total message size since the monitoring loop started, in <em>kilobytes</em>
+     * (divided by 1024 to avoid int32 overflow).
+     * Sent as {@code tot_size} (normalised with 1e9 on the Python side).
+     */
+    private long cumulativeSizeKB = 0;    // ─────────────────────────────────────────────────────────────────────────
 
     public RLAgentConnector(ServiceReplica serviceReplica, ThroughputLatencyServer serverInstance) {
         this.serviceReplica = serviceReplica;
@@ -201,7 +220,7 @@ public class RLAgentConnector {
                 // Calculate throughput (ops/sec) and Avg Latency (ns)
                 double throughput = (double) snapshot.ops * 1000.0 / snapshot.timeWindow;
                 double avgLatencyNs = snapshot.latencySamples > 0 ? (double) snapshot.latencySum / snapshot.latencySamples : 0;
-                // Convert to microseconds for the agent (matches scaling factor of 100,000 in trainer.py)
+                // Convert to microseconds (µs) – matches LATENCY_SCALE = 30 000 µs in trainer.py.
                 double avgLatencyUs = avgLatencyNs / 1000.0;
 
                 // 新增：计算平均消息大小（字节）
@@ -222,15 +241,36 @@ public class RLAgentConnector {
                     snapshot.timeWindow, snapshot.ops, snapshot.latencySum, snapshot.latencySamples,
                     throughput, avgLatencyUs, avgMessageSize, arrivalRate, usedMemory, maxMemory, memoryUsagePercent));
 
+                // Update cumulative / smoothed state for tot_thr, tot_lat, tot_size fields.
+                // These give the Python agent a longer-horizon temporal signal
+                // that is semantically different from the raw per-window values sent in
+                // throughput / latency / size.
+                cumulativeOps += snapshot.ops;
+                // EMA of latency (α=0.2): smoothed over ~5 windows = ~5 s horizon.
+                if (smoothedLatencyUs == 0.0) {
+                    smoothedLatencyUs = avgLatencyUs;  // cold-start: initialise to first sample
+                } else {
+                    smoothedLatencyUs = 0.8 * smoothedLatencyUs + 0.2 * avgLatencyUs;
+                }
+                cumulativeSizeKB += snapshot.totalSize / 1024;
+
                 // 2. Build Request (updated with size and arrival_rate)
                 MonitorProto.MetricsRequest request = MonitorProto.MetricsRequest.newBuilder()
                         .setThroughput((int) throughput)
-                        .setLatency((int) avgLatencyUs) 
-                        .setSize((int) avgMessageSize) // 新增：平均消息大小（字节）
-                        .setTotThr((int) throughput) // Simplified mapping
-                        .setTotLat((int) avgLatencyUs) 
-                        .setOption(1) // Option 1 for Batch Tuning
-                        .setArrivalRate(arrivalRate) // 新增：到达率（请求/秒）
+                        .setLatency((int) avgLatencyUs)
+                        .setSize((int) avgMessageSize)   // avg msg size per window (bytes)
+                        // tot_thr: cumulative completed ops since loop start
+                        //   normalised with 1e9 on Python side; meaningful for
+                        //   the agent to track experiment-wide progress.
+                        .setTotThr((int) Math.min(cumulativeOps, Integer.MAX_VALUE))
+                        // tot_lat: EMA-smoothed latency (µs) – same unit as latency field,
+                        //   normalised with LATENCY_SCALE on Python side.
+                        .setTotLat((int) smoothedLatencyUs)
+                        // tot_size: cumulative total message size (KB) since loop start
+                        //   normalised with 1e9 on Python side.
+                        .setTotSize((int) Math.min(cumulativeSizeKB, Integer.MAX_VALUE))
+                        .setOption(1)                    // Option 1 for Batch Tuning
+                        .setArrivalRate(arrivalRate)     // arrival rate (req/s)
                         .build();
 
                 // 3. Send RPC
