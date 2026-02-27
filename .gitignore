@@ -12,6 +12,7 @@ build
 .idea
 /gradle.properties
 
+__pycache__
 py-resdb
 .venv
 results*

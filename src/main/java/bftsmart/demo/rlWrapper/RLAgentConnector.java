@@ -1,5 +1,7 @@
 package bftsmart.demo.rlWrapper;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -9,7 +11,6 @@ import bftsmart.tom.ServiceReplica;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Connects a replica to the Python RL/Bayesian optimisation agent and applies
@@ -92,11 +93,12 @@ public class RLAgentConnector {
     private int monitorLoopCounter = 0;
     // ── Cumulative / smoothed state variables for tot_thr / tot_lat / tot_size ──────────
     /**
-     * Cumulative completed-operations count since the monitoring loop started.
-     * Sent as {@code tot_thr} to the Python agent (normalised with 1e9 on the Python side).
-     * int32-safe for experiments up to ~35 000 s at 60 k ops/s.
+     * Exponentially-weighted moving average of per-window throughput (ops/s), α = 0.2.
+     * Provides a smoothed / longer-horizon signal compared to the raw per-window value.
+     * Sent as {@code tot_thr}; same unit (ops/s) as the {@code throughput} field,
+     * normalised with THROUGHPUT_SCALE (60 000) on the Python side.
      */
-    private long cumulativeOps = 0;
+    private double smoothedThroughputOps = 0.0;
 
     /**
      * Exponentially-weighted moving average of per-window latency (µs), α = 0.2.
@@ -255,7 +257,12 @@ public class RLAgentConnector {
                 // These give the Python agent a longer-horizon temporal signal
                 // that is semantically different from the raw per-window values sent in
                 // throughput / latency / size.
-                cumulativeOps += snapshot.ops;
+                // EMA of throughput (α=0.2): smoothed over ~5 windows = ~5 s horizon.
+                if (smoothedThroughputOps == 0.0) {
+                    smoothedThroughputOps = throughput;  // cold-start: initialise to first sample
+                } else {
+                    smoothedThroughputOps = 0.8 * smoothedThroughputOps + 0.2 * throughput;
+                }
                 // EMA of latency (α=0.2): smoothed over ~5 windows = ~5 s horizon.
                 if (smoothedLatencyUs == 0.0) {
                     smoothedLatencyUs = avgLatencyUs;  // cold-start: initialise to first sample
@@ -269,10 +276,9 @@ public class RLAgentConnector {
                         .setThroughput((int) throughput)
                         .setLatency((int) avgLatencyUs)
                         .setSize((int) avgMessageSize)   // avg msg size per window (bytes)
-                        // tot_thr: cumulative completed ops since loop start
-                        //   normalised with 1e9 on Python side; meaningful for
-                        //   the agent to track experiment-wide progress.
-                        .setTotThr((int) Math.min(cumulativeOps, Integer.MAX_VALUE))
+                        // tot_thr: EMA-smoothed throughput (ops/s) – same unit as throughput field,
+                        //   normalised with THROUGHPUT_SCALE (60 000) on Python side.
+                        .setTotThr((int) smoothedThroughputOps)
                         // tot_lat: EMA-smoothed latency (µs) – same unit as latency field,
                         //   normalised with LATENCY_SCALE on Python side.
                         .setTotLat((int) smoothedLatencyUs)
