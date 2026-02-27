@@ -1,6 +1,7 @@
-# PPO 调参算法说明文档
+# PPO 调参算法说明文档（已更新）
 
 > 文件对应实现：`server_agent/trainer.py`，类 `PPO`
+> 最后更新：含 9 项 PPO 缺陷修复（#1-#8, #10）+ EMA tot_thr 修复
 
 ---
 
@@ -76,14 +77,22 @@ PPO 输出三个独立参数，各自对应离散动作空间中的索引：
 ## 4. Reward 函数
 
 ```python
-norm_thr = old_state[0] / THROUGHPUT_SCALE   # ∈ [0, 1]
-norm_lat = old_state[1] / LATENCY_SCALE       # ∈ [0, 1]
-reward = 1.0 * norm_thr + (-1.0) * norm_lat
+arrival         = max(old_state[6], 1.0)
+completion_rate = min(old_state[0] / arrival, 1.0)
+norm_lat        = old_state[1] / LATENCY_SCALE
+backlog_penalty = max(0.0, (arrival - old_state[0]) / THROUGHPUT_SCALE)
+reward = completion_rate - norm_lat - backlog_penalty
 ```
 
-- **直觉**：吞吐越高越好（+），延迟越高惩罚越大（−）。
-- 归一化后两项量级一致，权重 `±1.0` 保持对称。
-- 实际范围约 `[−1, +1]`；系统运行良好时 reward 应为正值。
+三个分量的含义：
+
+| 分量              | 范围       | 含义                                                              |
+|-------------------|------------|-------------------------------------------------------------------|
+| `completion_rate` | [0, 1]     | 服务完成率（throughput / arrival_rate），感知负载强度              |
+| `norm_lat`        | [0, ~1]    | 归一化延迟，越低越好                                               |
+| `backlog_penalty` | [0, ~1]    | 队列积压惩罚，仅在 arrival > throughput 时非零，惩罚过载状态       |
+
+- **旧公式 `norm_thr − norm_lat` 的缺陷**：在高负载时，吞吐因系统满载自然升高，旧公式会给出虚假高分。新公式用完成率代替绝对吞吐，reward 反映参数质量，而非负载强度。
 - **注意**：reward 使用 `old_state`（上一轮的观测），对应上一轮动作的实际效果（避免未来信息泄露）。
 
 ---
@@ -137,11 +146,14 @@ fc1_timeout: Linear(7 → 32) + ReLU
 | `gamma`                             | 0.98    | 折扣因子，控制对未来 reward 的重视程度           |
 | `lmbda`                             | 0.95    | GAE λ 参数，控制 bias-variance 权衡             |
 | `eps_clip`                          | 0.1     | PPO clip 范围，限制每次策略更新幅度              |
-| `K_epoch`                           | 5       | 每批数据重复训练轮数                             |
-| `T_horizon`                         | 20      | 水平窗口长度（已定义，但当前未强制用于触发训练）  |
-| `THROUGHPUT_SCALE`                  | 60,000  | 吞吐量归一化上限（ops/s）                       |
-| `LATENCY_SCALE`                     | 30,000  | 延迟归一化上限（µs = 30ms）                     |
-| `REQUEST_TIMEOUT_UPDATE_INTERVAL`   | 10      | timeout 决策间隔（对应 10s）                    |
+| `K_epoch`                           | 5       | 每批数据重复训练轮数                                 |
+| `T_horizon`                         | 20      | Batch 网络训练触发阈值（积累 20 条经验才触发训练）    |
+| `entropy_coef`                      | 0.01    | 熵正则化系数，防止策略过早收敛为确定性策略           |
+| `THROUGHPUT_SCALE`                  | 60,000  | 吞吐量归一化上限（ops/s）                           |
+| `LATENCY_SCALE`                     | 30,000  | 延迟归一化上限（µs = 30ms）                         |
+| `REQUEST_TIMEOUT_UPDATE_INTERVAL`   | 10      | timeout 决策间隔（对应 10s）                        |
+| `TIMEOUT_MIN_TRAIN_SIZE`            | 5       | Timeout 网络训练所需最少经验条数                    |
+| `TIMEOUT_BUFFER_MAXSIZE`            | 20      | Timeout 滚动经验缓冲区最大条数                      |
 
 ---
 
@@ -157,29 +169,44 @@ fc1_timeout: Linear(7 → 32) + ReLU
 │     → 存储 batch_state，返回动作空间中间值，不训练
 │
 ├─ 1. 计算 reward（基于 old_state，对应上一轮动作的效果）
-│      reward = norm_thr(old_state) − norm_lat(old_state)
+│      arrival         = max(old_state[6], 1.0)
+│      completion_rate = min(old_state[0] / arrival, 1.0)
+│      backlog_penalty = max(0, (arrival - old_state[0]) / THROUGHPUT_SCALE)
+│      reward = completion_rate - norm_lat - backlog_penalty
 │
-├─ 2. 向 batch 经验缓冲区写入 transition
-│      (s_norm, a_idx, b_idx, 0/c_idx, reward, s'_norm, old_prob_a, old_prob_b, old_prob_c)
+├─ 2. 向 batch 经验缓冲区写入 transition（10 字段）
+│      (s_norm, a_idx, b_idx, c_idx, reward, s'_norm, p_a, p_b, p_c, opt)
+│      ← opt 字段：记录本轮 option 值（1 或 2），供 mask 使用
 │
-├─ 3. timeout_reward_accumulator += reward
-│      timeout_reward_count += 1
+├─ 3. timeout_reward_accumulator += reward；count += 1
 │
-├─ 4. 训练 batch 子网络（train_net）← 每轮执行
-│      • make_batch() 取出缓冲区全部 transition（随即清空）
-│      • K_epoch=5 次 PPO-Clip 迭代
+├─ 4. 若 len(data) >= T_horizon(=20)：触发 train_net()
+│      • TD target 和 Advantage 在 K_epoch 循环外计算一次（no_grad 固定基线）
+│      • Advantage 归一化：(A − mean) / (std + ε)
+│      • mask_batch = (opt == 1).float()，mask_c = (opt == 2).float()
+│      • K_epoch=5 次 PPO-Clip 迭代，每次含熵正则化和梯度裁剪
 │      • 仅更新 fc1 / fc_pi_a,b,c / fc_v（通过 optimizer）
+│      • make_batch() 训练后清空 self.data
 │
 ├─ 5. old_state ← batch_state（滚动状态）
 │
 ├─ 6. [每 10 轮] should_update_timeout == True
 │      ├─ avg_reward = accumulator / count
-│      ├─ 向 timeout 缓冲区写入 (s_norm, d_idx, avg_reward, s'_norm, old_prob_d)
-│      ├─ 训练 timeout 子网络（train_timeout_net）
-│      │    • K_epoch=5 次 PPO-Clip 迭代
+│      │
+│      ├─ 使用 pending_timeout_* 快照构建 timeout 经验
+│      │    pending_* 在上一次 select_timeout_action 时立即保存：
+│      │    行动时刻的 state、d_idx、old_prob（确保 PPO ratio 正确）
+│      │
+│      ├─ 追加至 timeout 滚动缓冲区（上限 20 条，不完全清空）
+│      │
+│      ├─ 若 len(timeout_data) >= 5：触发 train_timeout_net()
+│      │    • 同 train_net 结构（固定基线、归一化、熵、梯度裁剪）
 │      │    • 仅更新 fc1_timeout / fc_pi_d / fc_v_timeout（通过 optimizer_timeout）
-│      ├─ select_timeout_action → 新 requestTimeout 索引
+│      │    • 训练后截断缓冲区至最新 20 条
+│      │
+│      ├─ select_timeout_action → 新 requestTimeout
 │      ├─ 安全约束：requestTimeout ≥ max(batchTimeout × 5, 1000ms)
+│      ├─ 立即更新 pending_timeout_state / d_idx / prob_d（行动时刻快照）
 │      └─ 重置 timeout_reward_accumulator / count
 │
 └─ 7. select_action → 新 batchSize / batchTimeout
@@ -198,19 +225,46 @@ $$A_t = \sum_{k=0}^{\infty} (\gamma \lambda)^k \delta_{t+k}, \quad \delta_t = r_
 
 其中 $\gamma=0.98$，$\lambda=0.95$。
 
+**关键**：TD target 和 $A_t$ 在 K_epoch 循环外用 `torch.no_grad()` 一次性计算固定，K_epoch 轮迭代共享同一基线（若每轮重算，clip 参考基准随策略移动，clip 机制失效）。
+
+**归一化**：$A_t$ 参与训练前执行 $(A - \mu_A) / (\sigma_A + \varepsilon)$，稳定梯度量级。
+
 ### PPO-Clip 损失
 
-$$L = -\min\left(\rho_t A_t,\ \text{clip}(\rho_t,\ 1-\varepsilon,\ 1+\varepsilon) \cdot A_t\right) + L_{\text{value}}$$
+$$L = -\min\!\left(\rho_t A_t,\ \text{clip}(\rho_t,\ 1-\varepsilon,\ 1+\varepsilon) \cdot A_t\right) + L_\text{value} - \alpha_H H(\pi)$$
 
-$$\rho_t = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_\text{old}}(a_t|s_t)}, \quad \varepsilon = 0.1$$
+$$\rho_t = \frac{\pi_\theta(a_t|s_t)}{\pi_{\theta_\text{old}}(a_t|s_t)}, \quad \varepsilon = 0.1, \quad \alpha_H = 0.01$$
 
-$$L_{\text{value}} = \text{SmoothL1}\bigl(V(s_t),\ r_t + \gamma V(s_{t+1})\bigr)$$
+$$L_\text{value} = \text{SmoothL1}\bigl(V(s_t),\ r_t + \gamma V(s_{t+1})\bigr)$$
 
-Batch 子网络有三个策略头（a/b/c），损失为三头之和，各乘以掩码（`mask_a/b/c`）区分 option=1 和 option=2 的样本。
+- **Batch 网络**：三个策略头（a/b/c）的 PPO 损失按 `mask_batch` / `mask_c` 加权求和；mask 基于 transition 中存储的 `opt` 字段（`mask_batch = (opt==1).float()`），而非旧版 `a != 0`。
+- **Timeout 网络**：单个策略头（d），独立熵正则化。
+- **梯度裁剪**：两个网络均在 `optimizer.step()` 前执行 `clip_grad_norm_(..., max_norm=0.5)`，防止单批次大噪声破坏收敛。
 
 ---
 
-## 9. 双频率相位同步
+## 9. Timeout old\_prob 正确性保证
+
+PPO 的重要性采样比率为 $\rho_t = \pi_\theta(a_t|s_t) / \pi_{\theta_\text{old}}(a_t|s_t)$，要求 $\pi_{\theta_\text{old}}$ 必须是**行动时刻**的策略概率。
+
+Timeout 动作每 10s 选择一次，但 Batch 子网络在此期间可能被更新若干次。若在 10s 后的"写入经验"时刻重新调用 `pi_d(s)` 计算 old_prob，则此时 $\pi_{\theta_\text{old}} \approx \pi_\theta$，ratio 恒为 1，clip 机制完全失效，退化为朴素 Policy Gradient。
+
+**修复方案**：`select_timeout_action()` 返回完整概率向量；`modelUpdate` 在选出动作后立即将 `(state_norm, d_idx, prob_d[d_idx])` 存入 `pending_timeout_*`；10s 后用这份快照构建经验 tuple，确保 old_prob 代表真正行动时刻的策略。
+
+```python
+# 行动时刻（立即保存快照）
+d_new, prob_d_vec = self.select_timeout_action(cur_norm)
+self.pending_timeout_d_idx  = d_new
+self.pending_timeout_prob_d = prob_d_vec[d_new].item()  # 行动时刻真实概率
+self.pending_timeout_state  = cur_norm
+
+# 10s 后写入 timeout 经验时使用该快照
+self.put_timeout_data((pending_state, pending_d_idx, avg_reward, cur_norm, pending_prob_d))
+```
+
+---
+
+## 10. 双频率相位同步
 
 Java 侧（`RLAgentConnector.java`）通过 `monitorLoopCounter % 10 == 0` 决定是否将本轮的 `requestTimeout` 应用到系统。
 
@@ -232,7 +286,7 @@ call #11 → counter = 11         timeout_iteration = 11
 
 ---
 
-## 10. 安全约束
+## 11. 安全约束
 
 ```python
 def _enforce_timeout_constraint(self, request_timeout, batch_timeout):
@@ -246,18 +300,24 @@ def _enforce_timeout_constraint(self, request_timeout, batch_timeout):
 
 ---
 
-## 11. 经验缓冲区
+## 12. 经验缓冲区
 
-| 缓冲区              | 每条 transition 字段                           | 清空时机                      |
-|---------------------|------------------------------------------------|-------------------------------|
-| `self.data`         | `(s, a, b, c, r, s', p_a, p_b, p_c)`          | `make_batch()` 调用后立即清空  |
-| `self.timeout_data` | `(s, d, r, s', p_d)`                           | `make_timeout_batch()` 后清空 |
+| 缓冲区              | 每条 transition 字段                                    | 管理方式                                            |
+|---------------------|--------------------------------------------------------|-----------------------------------------------------|
+| `self.data`         | `(s, a, b, c, r, s', p_a, p_b, p_c, opt)`（10 字段）  | 积累 T_horizon=20 条触发训练，`make_batch()` 后清空  |
+| `self.timeout_data` | `(s, d, r, s', p_d)`                                   | 滚动缓冲区：追加，训练后截断至最新 20 条，不完全清空 |
 
-目前两个缓冲区都是**有 1 条就训练**（`len >= 1` 触发），每轮只有 1 条样本。更高效的做法是等缓冲区达到 `T_horizon=20` 后再训练，梯度方差更小，策略更新更稳定。
+`pending_timeout_*` 辅助状态（非缓冲区）：
+
+| 字段                      | 含义                                                    |
+|---------------------------|---------------------------------------------------------|
+| `pending_timeout_state`   | 行动时刻归一化状态快照（用于写 timeout 经验的 s 字段）  |
+| `pending_timeout_d_idx`   | 行动时选出的 requestTimeout 索引                        |
+| `pending_timeout_prob_d`  | 行动时刻的 $\pi_{\theta_\text{old}}(d|s)$（确保 ratio 正确）|
 
 ---
 
-## 12. 模型持久化
+## 13. 模型持久化
 
 保存到 `ppo_model.pth`：
 
@@ -280,11 +340,25 @@ def _enforce_timeout_constraint(self, request_timeout, batch_timeout):
 
 ---
 
-## 13. 已知待改进问题
+## 14. 已修复问题记录
+
+| 编号 | 问题描述 | 修复方案 |
+|------|----------|----------|
+| #1 | T_horizon 未生效，每步训练 1 条样本 | 改为 `len(data) >= T_horizon` 触发 |
+| #2 | timeout old_prob 用了行动后（网络更新后）的策略概率 | 行动时刻立即保存 `pending_timeout_*` 快照 |
+| #3 | `mask_a = (a != 0).float()` 误屏蔽 batchSize=100 | 改为基于 transition 第 10 字段 `opt` 做 mask |
+| #4 | Advantage 在 K_epoch 每轮重新计算，clip 基准漂移 | 移到循环外，用 `no_grad()` 固定基线 |
+| #5 | 无熵正则化，策略过早收敛为确定性策略 | 加入 `- entropy_coef * entropy`（系数 0.01）|
+| #6 | 无梯度裁剪，单批噪声可破坏收敛 | 加入 `clip_grad_norm_(..., max_norm=0.5)` |
+| #7 | Advantage 未归一化，梯度量级不稳定 | 加入 `(A - mean) / (std + ε)` |
+| #8 | Timeout 缓冲区每次训练后清空，每轮仅单条经验 | 改为滚动缓冲区（min=5 条才训练，max=20 条保留）|
+| #10 | reward 不感知 arrival_rate，高负载时给出虚假高分 | 改用完成率 + 队列积压惩罚 |
+
+---
+
+## 15. 已知遗留问题
 
 | 问题 | 影响 | 优先级 |
 |------|------|--------|
-| 训练批大小为 1（未等到 T_horizon=20）| 梯度方差大，策略更新不稳定 | 高 |
-| `mask_a = (a != 0).float()` 错误屏蔽 `A_values[0]=100` | option=2 样本误掩 batchSize 最小值（当前 option=2 为死代码，暂无影响） | 低 |
-| timeout 经验同样 1 条就训练 | timeout 网络更新过于频繁，方差大 | 中 |
+| batchSize 和 batchTimeout 独立学习，无法建模耦合（大 BS + 极短 BT 是无效组合） | 可能选出次优参数组合 | 低（架构改动大） |
 | reward 无 P99 延迟软约束 | 长尾延迟不受控 | 中 |

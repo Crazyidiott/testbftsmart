@@ -160,10 +160,10 @@ def Normalized(state):
     state: [throughput, latency, payload, tot_thr, tot_lat, tot_size, arrival_rate]
     """
     max_vals = np.array([
-        THROUGHPUT_SCALE,    # index 0: throughput (每窗口 ops/s，上限 ~60k)
+        THROUGHPUT_SCALE,    # index 0: throughput (每窗口瞬时 ops/s，上限 ~60k)
         LATENCY_SCALE,       # index 1: latency (每窗口平均延迟 µs，上限 ~30ms)
         10000.0,             # index 2: payload (每消息平均字节，上限 ~10KB)
-        1e9,                 # index 3: tot_thr (累计完成 ops 数，随实验时间增长)
+        THROUGHPUT_SCALE,    # index 3: tot_thr (EMA 平滑吞吐量 ops/s，与 index 0 同量级)
         LATENCY_SCALE,       # index 4: tot_lat (EMA 平滑延迟 µs，单位与 latency 相同)
         1e9,                 # index 5: tot_size (累计消息字节数 KB，随实验时间增长)
         THROUGHPUT_SCALE,    # index 6: arrival_rate (到达率 req/s，同吞吐量量级)
@@ -1073,7 +1073,20 @@ class SimulatedAnnealing(OptimizerBase):
 
 # ============= PPO 实现 =============
 class PPO(nn.Module, OptimizerBase):
-    """PPO 算法 - 支持双频率调参: batch(1s) + requestTimeout(10s)"""
+    """
+    PPO 算法 - 双频率调参: batch（1s） + requestTimeout！10s）
+
+    网络结构设计原则：
+    - Batch 子网络（1s 频率）: fc1 -> fc_pi_a / fc_pi_b / fc_pi_c
+                                fc1 -> fc_v       (独立 critic)
+      由 optimizer 训练。
+
+    - Timeout 子网络（10s 频率）: fc1_timeout -> fc_pi_d
+                                  fc1_timeout -> fc_v_timeout  (独立 critic)
+      由 optimizer_timeout 训练。
+
+    两个子网络完全独立，不共享任何参数。
+    """
     
     def __init__(self):
         super(PPO, self).__init__()
@@ -1084,19 +1097,55 @@ class PPO(nn.Module, OptimizerBase):
 
         # 输入维度: [throughput, latency, size, tot_thr, tot_lat, tot_size, arrival_rate]
         input_dims = 7
-        hidden_dims = 64
 
-        self.fc1 = nn.Linear(input_dims, hidden_dims)
-        self.fc_pi_a = nn.Linear(hidden_dims, len(A_values))
-        self.fc_pi_b = nn.Linear(hidden_dims, len(B_values))
-        self.fc_pi_c = nn.Linear(hidden_dims, len(C_values))
-        self.fc_pi_d = nn.Linear(hidden_dims, len(D_values))  # requestTimeout head
-        self.fc_v = nn.Linear(hidden_dims, 1)
+        # ── Batch 子网络 (1s 频率) ──────────────────────────────────────────
+        # 负责决策 batchSize / batchTimeout / C，和对应的价値函数
+        batch_hidden = 64
+        self.fc1       = nn.Linear(input_dims, batch_hidden)
+        self.fc_pi_a   = nn.Linear(batch_hidden, len(A_values))
+        self.fc_pi_b   = nn.Linear(batch_hidden, len(B_values))
+        self.fc_pi_c   = nn.Linear(batch_hidden, len(C_values))
+        self.fc_v      = nn.Linear(batch_hidden, 1)
 
-        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
-        
+        # optimizer 仅覆盖 batch 子网络的参数，不包含 timeout 头
+        self.optimizer = optim.Adam(
+            list(self.fc1.parameters()) +
+            list(self.fc_pi_a.parameters()) +
+            list(self.fc_pi_b.parameters()) +
+            list(self.fc_pi_c.parameters()) +
+            list(self.fc_v.parameters()),
+            lr=learning_rate
+        )
+
+        # ── Timeout 子网络 (10s 频率) ────────────────────────────────────────
+        # 负责决策 requestTimeout，和对应的价値函数
+        # 训练信号是 10s 累积平均 reward，与 batch 网络完全独立。
+        timeout_hidden = 32  # 较小的隐蔗层（样本可能少，不需要大容量）
+        self.fc1_timeout     = nn.Linear(input_dims, timeout_hidden)
+        self.fc_pi_d         = nn.Linear(timeout_hidden, len(D_values))
+        self.fc_v_timeout    = nn.Linear(timeout_hidden, 1)
+
+        # optimizer_timeout 仅覆盖 timeout 子网络的参数，
+        # 不修改 fc1 / fc_v，避免与 batch 训练交叉干扰
+        self.optimizer_timeout = optim.Adam(
+            list(self.fc1_timeout.parameters()) +
+            list(self.fc_pi_d.parameters()) +
+            list(self.fc_v_timeout.parameters()),
+            lr=learning_rate
+        )
+
         # 初始 requestTimeout
         self.lastD = D_values[len(D_values) // 2].item()
+
+        # 熵正则化系数（修复 #5：防止策略过早收敛）
+        self.entropy_coef = 0.01
+
+        # 修复 #2：存储行动时刻的 timeout pending 信息，使 old_prob 正确
+        # pending_timeout_* 在每次 select_timeout_action 后立即设置，
+        # 10s 后（下一个 timeout 更新窗口）用于生成经验 tuple。
+        self.pending_timeout_state  = None
+        self.pending_timeout_d_idx  = None
+        self.pending_timeout_prob_d = None
 
     def pi(self, x, softmax_dim=-1):
         x = F.relu(self.fc1(x))
@@ -1106,10 +1155,15 @@ class PPO(nn.Module, OptimizerBase):
         return prob_a, prob_b, prob_c
 
     def pi_d(self, x, softmax_dim=-1):
-        """RequestTimeout 策略头（独立输出）"""
-        x = F.relu(self.fc1(x))
+        """RequestTimeout 策略头（使用独立的 fc1_timeout 特征提取层）"""
+        x = F.relu(self.fc1_timeout(x))
         prob_d = F.softmax(self.fc_pi_d(x), dim=softmax_dim)
         return prob_d
+
+    def v_timeout(self, x):
+        """Timeout critic（10s 频率，与 batch critic 独立）"""
+        x = F.relu(self.fc1_timeout(x))
+        return self.fc_v_timeout(x)
 
     def v(self, x):
         x = F.relu(self.fc1(x))
@@ -1124,10 +1178,11 @@ class PPO(nn.Module, OptimizerBase):
 
     def make_batch(self):
         s_lst, a_lst, b_lst, c_lst, r_lst, s_prime_lst = [], [], [], [], [], []
-        prob_a_lst, prob_b_lst, prob_c_lst = [], [], []
+        prob_a_lst, prob_b_lst, prob_c_lst, opt_lst = [], [], [], []
 
         for transition in self.data:
-            s, a, b, c, r, s_prime, p_a, p_b, p_c = transition
+            # 修复 #3：transition 第 10 个元素是 option（1 或 2），用于正确的 mask
+            s, a, b, c, r, s_prime, p_a, p_b, p_c, opt = transition
             s_lst.append(s)
             a_lst.append([a])
             b_lst.append([b])
@@ -1137,6 +1192,7 @@ class PPO(nn.Module, OptimizerBase):
             prob_a_lst.append([p_a])
             prob_b_lst.append([p_b])
             prob_c_lst.append([p_c])
+            opt_lst.append([opt])
 
         s = torch.tensor(np.array(s_lst), dtype=torch.float)
         a = torch.tensor(np.array(a_lst))
@@ -1147,106 +1203,155 @@ class PPO(nn.Module, OptimizerBase):
         prob_a = torch.tensor(np.array(prob_a_lst))
         prob_b = torch.tensor(np.array(prob_b_lst))
         prob_c = torch.tensor(np.array(prob_c_lst))
-        
+        opt    = torch.tensor(np.array(opt_lst))
+
         self.data = []
-        return s, a, b, c, r, s_prime, prob_a, prob_b, prob_c
+        return s, a, b, c, r, s_prime, prob_a, prob_b, prob_c, opt
 
     def make_timeout_batch(self):
-        """构建 timeout 训练批次"""
+        """构建 timeout 训练批次。
+        修复 #8: 不清空缓冲区，由 train_timeout_net 负责滚动窗口管理。
+        """
         s_lst, d_lst, r_lst, s_prime_lst, prob_d_lst = [], [], [], [], []
-        
+
         for s, d, r, s_prime, p_d in self.timeout_data:
             s_lst.append(s)
             d_lst.append([d])
             r_lst.append([r])
             s_prime_lst.append(s_prime)
             prob_d_lst.append([p_d])
-        
+
         s = torch.tensor(np.array(s_lst), dtype=torch.float)
         d = torch.tensor(np.array(d_lst))
         r = torch.tensor(np.array(r_lst))
         s_prime = torch.tensor(np.array(s_prime_lst), dtype=torch.float)
         prob_d = torch.tensor(np.array(prob_d_lst))
-        
-        self.timeout_data = []
+
+        # 注意：不清空 self.timeout_data，由调用方的滚动缓冲区逻辑管理
         return s, d, r, s_prime, prob_d
 
     def train_net(self):
-        s, a, b, c, r, s_prime, prob_a, prob_b, prob_c = self.make_batch()
-        
-        for i in range(K_epoch):
+        s, a, b, c, r, s_prime, prob_a, prob_b, prob_c, opt = self.make_batch()
+
+        # 修复 #4: Advantage 在 K_epoch 循环外计算一次，使用固定 baseline ──────────
+        with torch.no_grad():
             td_target = r + gamma * self.v(s_prime)
-            delta = td_target - self.v(s)
-            delta = delta.detach().numpy()
+            delta = (td_target - self.v(s)).numpy()
 
-            advantage_lst = []
-            advantage = 0.0
-            for delta_t in delta[::-1]:
-                advantage = gamma * lmbda * advantage + delta_t[0]
-                advantage_lst.append([advantage])
-            advantage_lst.reverse()
-            advantage = torch.tensor(advantage_lst, dtype=torch.float)
+        advantage_lst = []
+        advantage = 0.0
+        for delta_t in delta[::-1]:
+            advantage = gamma * lmbda * advantage + delta_t[0]
+            advantage_lst.append([advantage])
+        advantage_lst.reverse()
+        advantage = torch.tensor(advantage_lst, dtype=torch.float)
 
-            mask_a = (a != 0).float()
-            mask_b = (b != 0).float()
-            mask_c = (c != 0).float()
+        # 修复 #7: Advantage 归一化（T_horizon 保证 batch > 1 条）─────────────────
+        if advantage.shape[0] > 1:
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
 
-            pi_a, pi_b, pi_c = self.pi(s, softmax_dim=1)
-            pi_a = pi_a.gather(1, a)
-            pi_b = pi_b.gather(1, b)
-            pi_c = pi_c.gather(1, c)
-            
-            ratio_a = torch.exp(torch.log(pi_a) - torch.log(prob_a))
-            ratio_b = torch.exp(torch.log(pi_b) - torch.log(prob_b))
-            ratio_c = torch.exp(torch.log(pi_c) - torch.log(prob_c))
+        # 修复 #3: 用存储的 option 字段做 mask，不再用 a!=0 ──────────────────────────
+        # opt==1 → batch params（a, b）有效；opt==2 → C param（c）有效
+        mask_batch = (opt == 1).float()  # shape [N, 1]
+        mask_c     = (opt == 2).float()  # shape [N, 1]
 
-            surr1 = (ratio_a * advantage * mask_a + 
-                     ratio_b * advantage * mask_b + 
+        for i in range(K_epoch):
+            pi_a_all, pi_b_all, pi_c_all = self.pi(s, softmax_dim=1)
+            pi_a = pi_a_all.gather(1, a)
+            pi_b = pi_b_all.gather(1, b)
+            pi_c = pi_c_all.gather(1, c)
+
+            ratio_a = torch.exp(torch.log(pi_a + 1e-8) - torch.log(prob_a + 1e-8))
+            ratio_b = torch.exp(torch.log(pi_b + 1e-8) - torch.log(prob_b + 1e-8))
+            ratio_c = torch.exp(torch.log(pi_c + 1e-8) - torch.log(prob_c + 1e-8))
+
+            surr1 = (ratio_a * advantage * mask_batch +
+                     ratio_b * advantage * mask_batch +
                      ratio_c * advantage * mask_c)
-            
-            surr2 = (torch.clamp(ratio_a, 1 - eps_clip, 1 + eps_clip) * advantage * mask_a +
-                     torch.clamp(ratio_b, 1 - eps_clip, 1 + eps_clip) * advantage * mask_b +
+            surr2 = (torch.clamp(ratio_a, 1 - eps_clip, 1 + eps_clip) * advantage * mask_batch +
+                     torch.clamp(ratio_b, 1 - eps_clip, 1 + eps_clip) * advantage * mask_batch +
                      torch.clamp(ratio_c, 1 - eps_clip, 1 + eps_clip) * advantage * mask_c)
-            
-            loss = -torch.min(surr1, surr2).mean() + F.smooth_l1_loss(self.v(s), td_target.detach())
+
+            # 修复 #5: 熵正则化，防止策略过早收敛 ─────────────────────────────────
+            entropy_a = Categorical(probs=pi_a_all).entropy().unsqueeze(1)
+            entropy_b = Categorical(probs=pi_b_all).entropy().unsqueeze(1)
+            entropy_c = Categorical(probs=pi_c_all).entropy().unsqueeze(1)
+            entropy = (entropy_a * mask_batch + entropy_b * mask_batch + entropy_c * mask_c).mean()
+
+            policy_loss = -torch.min(surr1, surr2).mean()
+            value_loss  = F.smooth_l1_loss(self.v(s), td_target.detach())
+            loss = policy_loss + value_loss - self.entropy_coef * entropy
 
             self.optimizer.zero_grad()
-            loss.mean().backward()
+            loss.backward()
+            # 修复 #6: 梯度裁剪，防止单批次噪声产生超大梯度 ────────────────────────
+            nn.utils.clip_grad_norm_(
+                list(self.fc1.parameters()) + list(self.fc_pi_a.parameters()) +
+                list(self.fc_pi_b.parameters()) + list(self.fc_pi_c.parameters()) +
+                list(self.fc_v.parameters()),
+                max_norm=0.5
+            )
             self.optimizer.step()
 
     def train_timeout_net(self):
-        """训练 timeout 策略头（独立 PPO 更新）"""
-        if len(self.timeout_data) == 0:
+        """
+        训练 timeout 子网络（fc1_timeout + fc_pi_d + fc_v_timeout）。
+        修复 #8: 使用滚动缓冲区，跨 10s 窗口复用历史经验，最多保留 20 条。
+        仅当缓冲区至少积累 5 条经验时才开始训练，避免单样本过拟合。
+        """
+        TIMEOUT_MIN_TRAIN_SIZE = 5    # 最少 5 条才训练
+        TIMEOUT_BUFFER_MAXSIZE = 20   # 滚动窗口上限
+
+        if len(self.timeout_data) < TIMEOUT_MIN_TRAIN_SIZE:
             return
-        
+
         s, d, r, s_prime, prob_d = self.make_timeout_batch()
-        
+
+        # 修复 #4: Advantage 在 K_epoch 循环外计算一次，使用固定 baseline ──────────
+        with torch.no_grad():
+            td_target = r + gamma * self.v_timeout(s_prime)
+            delta = (td_target - self.v_timeout(s)).numpy()
+
+        advantage_lst = []
+        advantage = 0.0
+        for delta_t in delta[::-1]:
+            advantage = gamma * lmbda * advantage + delta_t[0]
+            advantage_lst.append([advantage])
+        advantage_lst.reverse()
+        advantage = torch.tensor(advantage_lst, dtype=torch.float)
+
+        # 修复 #7: Advantage 归一化 ────────────────────────────────────────────────
+        if advantage.shape[0] > 1:
+            advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
         for i in range(K_epoch):
-            td_target = r + gamma * self.v(s_prime)
-            delta = td_target - self.v(s)
-            delta = delta.detach().numpy()
-            
-            advantage_lst = []
-            advantage = 0.0
-            for delta_t in delta[::-1]:
-                advantage = gamma * lmbda * advantage + delta_t[0]
-                advantage_lst.append([advantage])
-            advantage_lst.reverse()
-            advantage = torch.tensor(advantage_lst, dtype=torch.float)
-            
-            pi_d = self.pi_d(s, softmax_dim=1)
-            pi_d = pi_d.gather(1, d)
-            
-            ratio_d = torch.exp(torch.log(pi_d) - torch.log(prob_d))
-            
+            pi_d_all = self.pi_d(s, softmax_dim=1)
+            pi_d_gathered = pi_d_all.gather(1, d)
+
+            ratio_d = torch.exp(torch.log(pi_d_gathered + 1e-8) - torch.log(prob_d + 1e-8))
+
             surr1 = ratio_d * advantage
             surr2 = torch.clamp(ratio_d, 1 - eps_clip, 1 + eps_clip) * advantage
-            
-            loss = -torch.min(surr1, surr2).mean() + F.smooth_l1_loss(self.v(s), td_target.detach())
-            
-            self.optimizer.zero_grad()
-            loss.mean().backward()
-            self.optimizer.step()
+
+            # 修复 #5: 熵正则化 ──────────────────────────────────────────────────
+            entropy = Categorical(probs=pi_d_all).entropy().mean()
+
+            value_loss = F.smooth_l1_loss(self.v_timeout(s), td_target.detach())
+            loss = -torch.min(surr1, surr2).mean() + value_loss - self.entropy_coef * entropy
+
+            self.optimizer_timeout.zero_grad()
+            loss.backward()
+            # 修复 #6: 梯度裁剪 ──────────────────────────────────────────────────
+            nn.utils.clip_grad_norm_(
+                list(self.fc1_timeout.parameters()) + list(self.fc_pi_d.parameters()) +
+                list(self.fc_v_timeout.parameters()),
+                max_norm=0.5
+            )
+            self.optimizer_timeout.step()
+
+        # 修复 #8: 训练后保留最新的 TIMEOUT_BUFFER_MAXSIZE 条，不完全清空 ─────────
+        if len(self.timeout_data) > TIMEOUT_BUFFER_MAXSIZE:
+            self.timeout_data = self.timeout_data[-TIMEOUT_BUFFER_MAXSIZE:]
 
     def select_action(self, s):
         prob_a, prob_b, prob_c = self.pi(torch.from_numpy(s).float())
@@ -1256,10 +1361,12 @@ class PPO(nn.Module, OptimizerBase):
         return a, b, c
 
     def select_timeout_action(self, s):
-        """选择 requestTimeout 动作"""
+        """选择 requestTimeout 动作，返回 (action_idx, full_prob_tensor)。
+        修复 #2: 返回完整概率向量，调用方在行动时刻立即保存，10s 后用作 old_prob。
+        """
         prob_d = self.pi_d(torch.from_numpy(s).float())
         d = Categorical(prob_d).sample().item()
-        return d, prob_d[d].item()
+        return d, prob_d.detach()
 
     def modelUpdate(self, batch_state, option):
         """PPO 双频率更新逻辑"""
@@ -1285,34 +1392,40 @@ class PPO(nn.Module, OptimizerBase):
                 self.lastC = 128
                 return self.lastC, 0, self.lastD
 
-        # 计算 reward (使用归一化后的值)
-        norm_thr = self.old_state[0] / THROUGHPUT_SCALE
-        norm_lat = self.old_state[1] / LATENCY_SCALE
-        reward = c_thr * norm_thr + c_lat * norm_lat
+        # 修复 #10: Reward 感知 arrival_rate ─────────────────────────────────────
+        # 用完成率（throughput / arrival_rate，上限 1.0）替代归一化吞吐量，
+        # 并增加队列积压惩罚（arrival > throughput 时额外扣分），
+        # 避免 agent 把"高负载带来的高吞吐"误认为是参数优化的结果。
+        arrival         = max(float(self.old_state[6]), 1.0)
+        completion_rate = min(float(self.old_state[0]) / arrival, 1.0)
+        norm_lat        = float(self.old_state[1]) / LATENCY_SCALE
+        backlog_penalty = max(0.0, (arrival - float(self.old_state[0])) / THROUGHPUT_SCALE)
+        reward = completion_rate - norm_lat - backlog_penalty
 
         norm_state = Normalized(self.old_state)
-        prob_a, prob_b, prob_c = self.pi(torch.from_numpy(norm_state).float())
-        
+        with torch.no_grad():
+            prob_a, prob_b, prob_c = self.pi(torch.from_numpy(norm_state).float())
+
         a = (torch.abs(A_values - self.lastA)).argmin().item()
         b = (torch.abs(B_values - self.lastB)).argmin().item()
         c = (torch.abs(C_values - self.lastC)).argmin().item()
 
-        # 存储 batch 经验
+        # 修复 #3: 存储 option 字段（第 10 个元素），使 train_net 能正确区分 mask ──
         if self.lastO == 1:
             self.put_data((norm_state, a, b, 0, reward, Normalized(batch_state),
-                          prob_a[a].item(), prob_b[b].item(), 1.0))
+                          prob_a[a].item(), prob_b[b].item(), 1.0, 1))
         else:
             self.put_data((norm_state, 0, 0, c, reward, Normalized(batch_state),
-                          1.0, 1.0, prob_c[c].item()))
-        
+                          1.0, 1.0, prob_c[c].item(), 2))
+
         self.score += reward
 
         # 累积 timeout reward
         self.timeout_reward_accumulator += reward
         self.timeout_reward_count += 1
 
-        # 训练 batch 网络
-        if len(self.data) >= 1:
+        # 修复 #1: T_horizon 生效 ── 等待 T_horizon 条经验再训练 ──────────────────
+        if len(self.data) >= T_horizon:
             self.train_net()
 
         # 更新状态
@@ -1320,29 +1433,40 @@ class PPO(nn.Module, OptimizerBase):
         self.lastO = option
 
         # --- Timeout 双频率逻辑 ---
-        # (timeout_iteration 和 should_update_timeout 已在函数顶部计算)
         if should_update_timeout and self.timeout_reward_count > 0:
             avg_reward = self.timeout_reward_accumulator / self.timeout_reward_count
-            
-            # 存储 timeout 经验（使用上一轮的 timeout 动作和累积 reward）
-            d_idx = (torch.abs(D_values - self.lastD)).argmin().item()
-            prob_d = self.pi_d(torch.from_numpy(norm_state).float())
-            self.put_timeout_data((norm_state, d_idx, avg_reward, 
-                                   Normalized(batch_state), prob_d[d_idx].item()))
-            
-            # 训练 timeout 网络
-            if len(self.timeout_data) >= 1:
-                self.train_timeout_net()
-            
-            # 选择新的 timeout
-            d_new, _ = self.select_timeout_action(Normalized(batch_state))
+
+            # 修复 #2: 用 pending 中保存的行动时刻状态和 old_prob ─────────────────
+            # pending_timeout_* 在上一个 timeout 窗口末尾（select_timeout_action 后）
+            # 立即记录，因此 old_prob 是真正行动时刻的策略概率，不是重新计算的值。
+            if self.pending_timeout_d_idx is not None:
+                self.put_timeout_data((
+                    self.pending_timeout_state,         # 行动时刻的状态
+                    self.pending_timeout_d_idx,         # 行动时刻的 action 索引
+                    avg_reward,                         # 10s 窗口累积平均 reward
+                    Normalized(batch_state),            # 当前状态（next_state）
+                    self.pending_timeout_prob_d,        # 行动时刻的 old_prob (scalar)
+                ))
+
+            # 修复 #8: 滚动缓冲区触发训练（train_timeout_net 内部管理 min/max 大小）
+            self.train_timeout_net()
+
+            # 选择新的 timeout 动作，并立即存储 pending（修复 #2）──────────────────
+            cur_norm = Normalized(batch_state)
+            d_new, prob_d_vec = self.select_timeout_action(cur_norm)
             new_d = D_values[d_new].item()
-            new_d = self._enforce_timeout_constraint(new_d, self.lastB if option == 1 else 
-                                                      B_values[len(B_values) // 2].item())
+            new_d = self._enforce_timeout_constraint(
+                new_d, self.lastB if option == 1 else B_values[len(B_values) // 2].item())
             self.lastD = new_d
-            
-            print(f"[PPO] Timeout update: RT={self.lastD}, avg_reward={avg_reward:.4f}")
-            
+
+            # 记录行动时刻的信息（供下一个 10s 窗口生成 experience 时使用）
+            self.pending_timeout_d_idx  = (torch.abs(D_values - self.lastD)).argmin().item()
+            self.pending_timeout_prob_d = prob_d_vec[self.pending_timeout_d_idx].item()
+            self.pending_timeout_state  = cur_norm
+
+            print(f"[PPO] Timeout update: RT={self.lastD}, avg_reward={avg_reward:.4f}, "
+                  f"timeout_buf={len(self.timeout_data)}")
+
             # 重置累积器
             self.timeout_reward_accumulator = 0.0
             self.timeout_reward_count = 0
@@ -1369,20 +1493,59 @@ class PPO(nn.Module, OptimizerBase):
     def save_model(self):
         model_path = 'ppo_model.pth'
         torch.save({
-            'model_state': self.state_dict(),
+            # Batch 子网络
+            'batch_net_state': {
+                'fc1': self.fc1.state_dict(),
+                'fc_pi_a': self.fc_pi_a.state_dict(),
+                'fc_pi_b': self.fc_pi_b.state_dict(),
+                'fc_pi_c': self.fc_pi_c.state_dict(),
+                'fc_v': self.fc_v.state_dict(),
+            },
             'optimizer_state': self.optimizer.state_dict(),
+            # Timeout 子网络
+            'timeout_net_state': {
+                'fc1_timeout': self.fc1_timeout.state_dict(),
+                'fc_pi_d': self.fc_pi_d.state_dict(),
+                'fc_v_timeout': self.fc_v_timeout.state_dict(),
+            },
+            'optimizer_timeout_state': self.optimizer_timeout.state_dict(),
+            # 元数据
             'lastD': self.lastD,
-            'timeout_iteration': self.timeout_iteration
+            'timeout_iteration': self.timeout_iteration,
         }, model_path)
+        print(f"[PPO] Model saved to {model_path}")
 
     def load_model(self):
         model_path = 'ppo_model.pth'
-        if os.path.exists(model_path):
+        if not os.path.exists(model_path):
+            print(f"[PPO] No saved model found at {model_path}, starting fresh.")
+            return
+        try:
             checkpoint = torch.load(model_path)
-            self.load_state_dict(checkpoint['model_state'])
-            self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+            # Batch 子网络
+            batch = checkpoint.get('batch_net_state', {})
+            if batch:
+                self.fc1.load_state_dict(batch['fc1'])
+                self.fc_pi_a.load_state_dict(batch['fc_pi_a'])
+                self.fc_pi_b.load_state_dict(batch['fc_pi_b'])
+                self.fc_pi_c.load_state_dict(batch['fc_pi_c'])
+                self.fc_v.load_state_dict(batch['fc_v'])
+            if 'optimizer_state' in checkpoint:
+                self.optimizer.load_state_dict(checkpoint['optimizer_state'])
+            # Timeout 子网络
+            timeout = checkpoint.get('timeout_net_state', {})
+            if timeout:
+                self.fc1_timeout.load_state_dict(timeout['fc1_timeout'])
+                self.fc_pi_d.load_state_dict(timeout['fc_pi_d'])
+                self.fc_v_timeout.load_state_dict(timeout['fc_v_timeout'])
+            if 'optimizer_timeout_state' in checkpoint:
+                self.optimizer_timeout.load_state_dict(checkpoint['optimizer_timeout_state'])
+            # 元数据
             self.lastD = checkpoint.get('lastD', D_values[len(D_values) // 2].item())
             self.timeout_iteration = checkpoint.get('timeout_iteration', 0)
+            print(f"[PPO] Model loaded from {model_path}")
+        except Exception as e:
+            print(f"[PPO] Failed to load model: {e}. Starting fresh.")
 
 # ============= Static Optimizer =============
 class StaticOptimizer(OptimizerBase):
