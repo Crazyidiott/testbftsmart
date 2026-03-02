@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rmonitor.proto\"\x9d\x01\n\x0eMetricsRequest\x12\x12\n\nthroughput\x18\x01 \x01(\x05\x12\x0f\n\x07latency\x18\x02 \x01(\x05\x12\x0c\n\x04size\x18\x03 \x01(\x05\x12\x0f\n\x07tot_thr\x18\x04 \x01(\x05\x12\x0f\n\x07tot_lat\x18\x05 \x01(\x05\x12\x10\n\x08tot_size\x18\x06 \x01(\x05\x12\x0e\n\x06option\x18\x07 \x01(\x05\x12\x14\n\x0c\x61rrival_rate\x18\x08 \x01(\x01\":\n\x0fMetricsResponse\x12\x11\n\tBatchSize\x18\x01 \x01(\x05\x12\x14\n\x0c\x42\x61tchTimeout\x18\x02 \x01(\x05\"\x1e\n\tTimestamp\x12\x11\n\ttimestamp\x18\x01 \x01(\x03\x32\x65\n\x0eMetricsService\x12\x30\n\x0bSendMetrics\x12\x0f.MetricsRequest\x1a\x10.MetricsResponse\x12!\n\x07\x43onnect\x12\n.Timestamp\x1a\n.TimestampB\'\n\x17\x62\x66tsmart.demo.rlWrapperB\x0cMonitorProtob\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rmonitor.proto\"\x9d\x01\n\x0eMetricsRequest\x12\x12\n\nthroughput\x18\x01 \x01(\x05\x12\x0f\n\x07latency\x18\x02 \x01(\x05\x12\x0c\n\x04size\x18\x03 \x01(\x05\x12\x0f\n\x07tot_thr\x18\x04 \x01(\x05\x12\x0f\n\x07tot_lat\x18\x05 \x01(\x05\x12\x10\n\x08tot_size\x18\x06 \x01(\x05\x12\x0e\n\x06option\x18\x07 \x01(\x05\x12\x14\n\x0c\x61rrival_rate\x18\x08 \x01(\x01\"R\n\x0fMetricsResponse\x12\x11\n\tBatchSize\x18\x01 \x01(\x05\x12\x14\n\x0c\x42\x61tchTimeout\x18\x02 \x01(\x05\x12\x16\n\x0eRequestTimeout\x18\x03 \x01(\x05\"\x1e\n\tTimestamp\x12\x11\n\ttimestamp\x18\x01 \x01(\x03\x32\x65\n\x0eMetricsService\x12\x30\n\x0bSendMetrics\x12\x0f.MetricsRequest\x1a\x10.MetricsResponse\x12!\n\x07\x43onnect\x12\n.Timestamp\x1a\n.TimestampB\'\n\x17\x62\x66tsmart.demo.rlWrapperB\x0cMonitorProtob\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,9 +35,9 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_METRICSREQUEST']._serialized_start=18
   _globals['_METRICSREQUEST']._serialized_end=175
   _globals['_METRICSRESPONSE']._serialized_start=177
-  _globals['_METRICSRESPONSE']._serialized_end=235
-  _globals['_TIMESTAMP']._serialized_start=237
-  _globals['_TIMESTAMP']._serialized_end=267
-  _globals['_METRICSSERVICE']._serialized_start=269
-  _globals['_METRICSSERVICE']._serialized_end=370
+  _globals['_METRICSRESPONSE']._serialized_end=259
+  _globals['_TIMESTAMP']._serialized_start=261
+  _globals['_TIMESTAMP']._serialized_end=291
+  _globals['_METRICSSERVICE']._serialized_start=293
+  _globals['_METRICSSERVICE']._serialized_end=394
 # @@protoc_insertion_point(module_scope)

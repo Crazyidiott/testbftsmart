@@ -403,12 +403,21 @@ for i in {0..3}; do
     host=${NODES[$i]}
     echo "    Stopping processes on Node $i..."
     ssh -i "$KEY" "$USER@$host" "
-        # Kill Java processes (Server) - same logic as cleanup at start
-        ps -ef | grep 'java' | grep 'bftsmart' | grep -v 'grep' | grep -v 'bash -c' | awk '{print \\\$2}' | xargs -r kill -9
-        
+        # Gracefully stop Java processes (SIGTERM) to allow shutdown hooks to run
+        JAVA_PIDS=\$(ps -ef | grep 'java' | grep 'bftsmart' | grep -v 'grep' | grep -v 'bash -c' | awk '{print \$2}')
+        if [ -n \"\$JAVA_PIDS\" ]; then
+            echo \$JAVA_PIDS | xargs -r kill -15
+            sleep 5
+            # Force kill any remaining Java processes
+            JAVA_PIDS_REMAINING=\$(ps -ef | grep 'java' | grep 'bftsmart' | grep -v 'grep' | grep -v 'bash -c' | awk '{print \$2}')
+            if [ -n \"\$JAVA_PIDS_REMAINING\" ]; then
+                echo \$JAVA_PIDS_REMAINING | xargs -r kill -9
+            fi
+        fi
+
         # Kill wrapper scripts (smartrun.sh)
         ps -ef | grep 'smartrun.sh' | grep -v 'grep' | grep -v 'bash -c' | awk '{print \\\$2}' | xargs -r kill -9
-        
+
         # Kill RL agents
         ps -ef | grep 'python3.*trainer.py\\|python3.*mock_agent.py' | grep -v 'grep' | grep -v 'bash' | awk '{print \\\$2}' | xargs -r kill -9
     " 2>/dev/null || true
