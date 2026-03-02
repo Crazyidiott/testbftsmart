@@ -80,18 +80,25 @@ public class RequestsTimer {
     /**
      * Dynamically update the request timeout value.
      * If a timer is currently running, it will be restarted with the new timeout.
+     * Must be called while holding rwLock.writeLock() or acquire it here.
      * @param timeout New timeout in milliseconds.
      */
     public void setTimeout(long timeout) {
-        this.timeout = timeout;
-        // Restart the running timer with the new timeout value
-        if (rtTask != null) {
-            stopTimer();
-            startTimer();
+        rwLock.writeLock().lock();
+        try {
+            this.timeout = timeout;
+            // Restart the running timer with the new timeout value
+            if (rtTask != null) {
+                stopTimer();
+                startTimer();
+            }
+        } finally {
+            rwLock.writeLock().unlock();
         }
     }
     
     public void startTimer() {
+        // Must be called while holding rwLock.writeLock()
         if (rtTask == null) {
             long t = (shortTimeout > -1 ? shortTimeout : timeout);
             //shortTimeout = -1;
@@ -101,6 +108,7 @@ public class RequestsTimer {
     }
     
     public void stopTimer() {
+        // Must be called while holding rwLock.writeLock()
         if (rtTask != null) {
             rtTask.cancel();
             rtTask = null;
