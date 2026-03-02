@@ -157,6 +157,25 @@ ps -ef | grep 'python3.*trainer.py\|python3.*mock_agent.py' | grep -v grep | gre
 
 sleep 2
 
+# Verify agent port is free (critical: leftover processes cause silent startup failure)
+SHARED_AGENT_PORT=45678
+for _retry in $(seq 1 5); do
+    if ss -tlnp | grep -q ":${SHARED_AGENT_PORT} "; then
+        echo "    [Cleanup] Port ${SHARED_AGENT_PORT} still in use, waiting..."
+        pkill -9 -f 'python3.*trainer.py' 2>/dev/null
+        pkill -9 -f 'python3.*mock_agent.py' 2>/dev/null
+        sleep 2
+    else
+        break
+    fi
+done
+if ss -tlnp | grep -q ":${SHARED_AGENT_PORT} "; then
+    echo "    ERROR: Port ${SHARED_AGENT_PORT} is still occupied after cleanup! Aborting."
+    ss -tlnp | grep ":${SHARED_AGENT_PORT} "
+    exit 1
+fi
+echo "    [Cleanup] Port ${SHARED_AGENT_PORT} is free."
+
 echo "    [Cleanup] Removing currentView..."
 rm -rf "${LOCAL_PROJECT_PATH}/config/currentView"*
 
@@ -202,42 +221,66 @@ echo "    Environment setup complete."
 echo ">>> [Step 3] Starting Replicas (Nodes 0-3)..."
 cd "${LOCAL_PROJECT_PATH}"
 
-for i in {0..3}; do
-    AGENT_PORT=$((45678 + i))
-    echo "    Starting Replica $i on 127.0.0.1 (Agent port: $AGENT_PORT)..."
+# ── Single-machine deployment: start ONE shared Python agent ──────────────
+# All 4 replicas connect to the same agent on port 45678.
+# Only the leader sends metrics (triggers training); followers call GetCurrentParams.
+SHARED_AGENT_PORT=45678
 
-    # Start the Python Agent FIRST (per-replica, each on a unique port)
-    if [ "${ALG_NAME}" == "NONE" ]; then
-        echo "    [NONE MODE] No Python Agent - using system.config parameters directly"
-        echo "    BatchSize=${MAX_BATCH_SIZE}, Timeout=${TIMEOUT_VAL} (from system.config)"
-    elif [ "${ALG_NAME}" == "STATIC" ]; then
-        echo "    [STATIC MODE] Starting Python Agent with STATIC algorithm for metrics output..."
-        echo "    Using BatchSize=${MAX_BATCH_SIZE}, BatchTimeout=${TIMEOUT_VAL}"
-        nohup env OPT_ALGORITHM=STATIC STATIC_BATCH_SIZE=${MAX_BATCH_SIZE} STATIC_BATCH_TIMEOUT=${TIMEOUT_VAL} AGENT_PORT=${AGENT_PORT} \
-            "${PYTHON_BIN}" "${LOCAL_PROJECT_PATH}/server_agent/trainer.py" \
-            > "${LOCAL_PROJECT_PATH}/server_agent/agent_${i}.log" 2>&1 &
-        echo "    Python Agent started with STATIC algorithm (PID: $!, port: $AGENT_PORT)"
-    elif [ "${ALG_NAME}" == "MOCK" ]; then
-        echo "    [MOCK MODE] Launching Mock Agent..."
-        nohup "${PYTHON_BIN}" "${LOCAL_PROJECT_PATH}/server_agent/mock_agent.py" --mode fixed --port ${AGENT_PORT} \
-            > "${LOCAL_PROJECT_PATH}/server_agent/agent_${i}.log" 2>&1 &
-        echo "    Mock Agent started (PID: $!, port: $AGENT_PORT)"
-    else
-        echo "    [DYNAMIC MODE] Launching Python Agent with algorithm: ${ALG_NAME}..."
-        nohup env OPT_ALGORITHM=${ALG_NAME} AGENT_PORT=${AGENT_PORT} \
-            "${PYTHON_BIN}" "${LOCAL_PROJECT_PATH}/server_agent/trainer.py" \
-            > "${LOCAL_PROJECT_PATH}/server_agent/agent_${i}.log" 2>&1 &
-        echo "    Python Agent started (PID: $!, port: $AGENT_PORT)"
+if [ "${ALG_NAME}" == "NONE" ]; then
+    echo "    [NONE MODE] No Python Agent - using system.config parameters directly"
+    echo "    BatchSize=${MAX_BATCH_SIZE}, Timeout=${TIMEOUT_VAL} (from system.config)"
+elif [ "${ALG_NAME}" == "STATIC" ]; then
+    echo "    [STATIC MODE] Starting SINGLE shared Python Agent (port: $SHARED_AGENT_PORT)..."
+    echo "    Using BatchSize=${MAX_BATCH_SIZE}, BatchTimeout=${TIMEOUT_VAL}"
+    (cd "${LOCAL_PROJECT_PATH}/server_agent" && \
+    nohup env OPT_ALGORITHM=STATIC STATIC_BATCH_SIZE=${MAX_BATCH_SIZE} STATIC_BATCH_TIMEOUT=${TIMEOUT_VAL} AGENT_PORT=${SHARED_AGENT_PORT} PYTHONUNBUFFERED=1 \
+        "${PYTHON_BIN}" trainer.py \
+        > "${LOCAL_PROJECT_PATH}/server_agent/agent_shared.log" 2>&1 &)
+    echo "    Python Agent started with STATIC algorithm (port: $SHARED_AGENT_PORT)"
+elif [ "${ALG_NAME}" == "MOCK" ]; then
+    echo "    [MOCK MODE] Launching SINGLE shared Mock Agent (port: $SHARED_AGENT_PORT)..."
+    (cd "${LOCAL_PROJECT_PATH}/server_agent" && \
+    nohup "${PYTHON_BIN}" mock_agent.py --mode fixed --port ${SHARED_AGENT_PORT} \
+        > "${LOCAL_PROJECT_PATH}/server_agent/agent_shared.log" 2>&1 &)
+    echo "    Mock Agent started (port: $SHARED_AGENT_PORT)"
+else
+    echo "    [DYNAMIC MODE] Launching SINGLE shared Python Agent with algorithm: ${ALG_NAME} (port: $SHARED_AGENT_PORT)..."
+    (cd "${LOCAL_PROJECT_PATH}/server_agent" && \
+    nohup env OPT_ALGORITHM=${ALG_NAME} AGENT_PORT=${SHARED_AGENT_PORT} PYTHONUNBUFFERED=1 \
+        "${PYTHON_BIN}" trainer.py \
+        > "${LOCAL_PROJECT_PATH}/server_agent/agent_shared.log" 2>&1 &)
+    echo "    Python Agent started (port: $SHARED_AGENT_PORT)"
+fi
+
+# Wait for the agent to be ready before starting servers
+if [ "${ALG_NAME}" != "NONE" ]; then
+    echo "    Waiting for Python Agent to start on port ${SHARED_AGENT_PORT}..."
+    _agent_ready=false
+    for _wait in $(seq 1 30); do
+        if ss -tlnp | grep -q ":${SHARED_AGENT_PORT} "; then
+            _agent_ready=true
+            echo "    Python Agent is listening on port ${SHARED_AGENT_PORT} (took ${_wait}s)"
+            break
+        fi
+        sleep 1
+    done
+    if [ "$_agent_ready" != "true" ]; then
+        echo "    ERROR: Python Agent failed to start! Check agent_shared.log:"
+        cat "${LOCAL_PROJECT_PATH}/server_agent/agent_shared.log" 2>/dev/null || echo "    (log file empty or missing)"
+        exit 1
     fi
+fi
 
-    # Then start the Java Server (with matching AGENT_PORT)
+for i in {0..3}; do
+    echo "    Starting Replica $i on 127.0.0.1 (Agent port: $SHARED_AGENT_PORT)..."
+
+    # Start the Java Server (all replicas connect to the same shared agent)
+    cd "${LOCAL_PROJECT_PATH}"
     export ENABLE_GC_LOG=${ENABLE_GC_LOG:-false}
-    export AGENT_PORT=${AGENT_PORT}
+    export AGENT_PORT=${SHARED_AGENT_PORT}
     nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyServer $i 1000 1024 1024 false nosig 0 \
         > "server_$i.log" 2>&1 &
     echo "    Replica $i started (PID: $!)"
-    # nohup ./runscripts/smartrun.sh bftsmart.demo.counter.CounterServer $i > server_$i.log 2>&1 &
-    # nohup ./runscripts/smartrun.sh bftsmart.benchmark.ThroughputLatencyServer $i 1024 > server_$i.log 2>&1 &
 done
 
 echo "    Waiting 10 seconds for cluster to stabilize..."
@@ -323,10 +366,11 @@ mkdir -p results
 for i in {0..3}; do
     echo "    Collecting logs from Replica $i..."
     cp -f "${LOCAL_PROJECT_PATH}/server_$i.log" "./results/server_$i.log" 2>/dev/null || true
-    cp -f "${LOCAL_PROJECT_PATH}/server_agent/agent_$i.log" "./results/agent_$i.log" 2>/dev/null || true
     # GC logs (optional, generated when ENABLE_GC_LOG=true)
     cp -f "${LOCAL_PROJECT_PATH}/gc_$i.log" "./results/gc_$i.log" 2>/dev/null || true
 done
+# Copy shared agent log (single agent for local deployment)
+cp -f "${LOCAL_PROJECT_PATH}/server_agent/agent_shared.log" "./results/agent_shared.log" 2>/dev/null || true
 
 echo "    Cleaning temporary files..."
 rm -f /tmp/bft-*
