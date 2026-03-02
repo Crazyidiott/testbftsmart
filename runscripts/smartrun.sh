@@ -34,4 +34,7 @@ if [ "$ENABLE_GC_LOG" = "true" ]; then
     echo "GC logging enabled: gc_${SERVER_ID}.log"
 fi
 
-java $JAVA_OPTS -Djava.security.properties="./config/java.security" -Dlogback.configurationFile="./config/logback.xml" -cp "lib/*" $@
+# RL Agent Port (for local deployment, each replica uses a different port)
+AGENT_PORT="${AGENT_PORT:-45678}"
+
+java $JAVA_OPTS -Djava.security.properties="./config/java.security" -Dlogback.configurationFile="./config/logback.xml" -Dagent.port="$AGENT_PORT" -cp "lib/*" $@

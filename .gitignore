@@ -17,3 +17,9 @@ py-resdb
 .venv
 results*
 benchmark_results*
+lib/
+experiments/
+*.log
+rlenv/
+*.txt
+*.csv

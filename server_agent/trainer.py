@@ -2077,6 +2077,9 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
 def serve():
     """启动 gRPC 服务器"""
     
+    # 从环境变量读取端口，默认 45678（兼容单机多副本部署）
+    port = int(os.environ.get('AGENT_PORT', '45678'))
+    
     # 初始化数据记录器
     data_logger = DataLogger(ALGORITHM)
     
@@ -2087,12 +2090,12 @@ def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     servicer = MetricsServiceServicer(model, data_logger)
     monitor_pb2_grpc.add_MetricsServiceServicer_to_server(servicer, server)
-    server.add_insecure_port('[::]:45678')
+    server.add_insecure_port(f'[::]:{port}')
     server.start()
     
     # 打印启动信息
     print(f"="*60)
-    print(f"Server started on port 45678")
+    print(f"Server started on port {port}")
     print(f"Algorithm: {ALGORITHM}")
     print(f"Experiment directory: {data_logger.exp_dir}")
     print(f"Metrics file: {data_logger.metrics_file}")

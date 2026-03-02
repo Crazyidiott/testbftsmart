@@ -203,34 +203,36 @@ echo ">>> [Step 3] Starting Replicas (Nodes 0-3)..."
 cd "${LOCAL_PROJECT_PATH}"
 
 for i in {0..3}; do
-    echo "    Starting Replica $i on 127.0.0.1..."
+    AGENT_PORT=$((45678 + i))
+    echo "    Starting Replica $i on 127.0.0.1 (Agent port: $AGENT_PORT)..."
 
-    # Start the Python Agent FIRST (per-replica, same as lan_deploy.sh)
+    # Start the Python Agent FIRST (per-replica, each on a unique port)
     if [ "${ALG_NAME}" == "NONE" ]; then
         echo "    [NONE MODE] No Python Agent - using system.config parameters directly"
         echo "    BatchSize=${MAX_BATCH_SIZE}, Timeout=${TIMEOUT_VAL} (from system.config)"
     elif [ "${ALG_NAME}" == "STATIC" ]; then
         echo "    [STATIC MODE] Starting Python Agent with STATIC algorithm for metrics output..."
         echo "    Using BatchSize=${MAX_BATCH_SIZE}, BatchTimeout=${TIMEOUT_VAL}"
-        nohup env OPT_ALGORITHM=STATIC STATIC_BATCH_SIZE=${MAX_BATCH_SIZE} STATIC_BATCH_TIMEOUT=${TIMEOUT_VAL} \
+        nohup env OPT_ALGORITHM=STATIC STATIC_BATCH_SIZE=${MAX_BATCH_SIZE} STATIC_BATCH_TIMEOUT=${TIMEOUT_VAL} AGENT_PORT=${AGENT_PORT} \
             "${PYTHON_BIN}" "${LOCAL_PROJECT_PATH}/server_agent/trainer.py" \
             > "${LOCAL_PROJECT_PATH}/server_agent/agent_${i}.log" 2>&1 &
-        echo "    Python Agent started with STATIC algorithm (PID: $!)"
+        echo "    Python Agent started with STATIC algorithm (PID: $!, port: $AGENT_PORT)"
     elif [ "${ALG_NAME}" == "MOCK" ]; then
         echo "    [MOCK MODE] Launching Mock Agent..."
-        nohup "${PYTHON_BIN}" "${LOCAL_PROJECT_PATH}/server_agent/mock_agent.py" --mode fixed \
+        nohup "${PYTHON_BIN}" "${LOCAL_PROJECT_PATH}/server_agent/mock_agent.py" --mode fixed --port ${AGENT_PORT} \
             > "${LOCAL_PROJECT_PATH}/server_agent/agent_${i}.log" 2>&1 &
-        echo "    Mock Agent started (PID: $!)"
+        echo "    Mock Agent started (PID: $!, port: $AGENT_PORT)"
     else
         echo "    [DYNAMIC MODE] Launching Python Agent with algorithm: ${ALG_NAME}..."
-        nohup env OPT_ALGORITHM=${ALG_NAME} \
+        nohup env OPT_ALGORITHM=${ALG_NAME} AGENT_PORT=${AGENT_PORT} \
             "${PYTHON_BIN}" "${LOCAL_PROJECT_PATH}/server_agent/trainer.py" \
             > "${LOCAL_PROJECT_PATH}/server_agent/agent_${i}.log" 2>&1 &
-        echo "    Python Agent started (PID: $!)"
+        echo "    Python Agent started (PID: $!, port: $AGENT_PORT)"
     fi
 
-    # Then start the Java Server
+    # Then start the Java Server (with matching AGENT_PORT)
     export ENABLE_GC_LOG=${ENABLE_GC_LOG:-false}
+    export AGENT_PORT=${AGENT_PORT}
     nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.ThroughputLatencyServer $i 1000 1024 1024 false nosig 0 \
         > "server_$i.log" 2>&1 &
     echo "    Replica $i started (PID: $!)"

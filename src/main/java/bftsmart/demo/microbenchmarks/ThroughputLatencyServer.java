@@ -248,8 +248,9 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
 
         // Initialize and start RL Agent Connector
         rlConnector = new RLAgentConnector(replica, this);
-        // Changed port from 50051 to 45678 to match trainer.py
-        if (rlConnector.connectToAgent("localhost", 45678)) {
+        // Read agent port from system property (default 45678), supports per-replica ports in local deployment
+        int agentPort = Integer.parseInt(System.getProperty("agent.port", "45678"));
+        if (rlConnector.connectToAgent("localhost", agentPort)) {
            rlThread = new Thread(rlConnector::startMonitoringLoop);
            rlThread.setName("RL-Agent-Connector");
            rlThread.setDaemon(true);
