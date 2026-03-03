@@ -2031,6 +2031,22 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
             
             return monitor_pb2.MetricsResponse(BatchSize=SeqNum, BatchTimeout=0)
     
+    def GetCurrentParams(self, request, context):
+        """返回当前参数（不触发训练）。非 leader 节点使用此 RPC 获取最新参数。"""
+        # 使用模型最后输出的参数值，不调用 modelUpdate
+        batch_size = getattr(self.model, 'lastA', 0) or getattr(self.model, 'default_batch_size', 500)
+        batch_timeout = getattr(self.model, 'lastB', 0) or getattr(self.model, 'default_batch_timeout', 100)
+        request_timeout = getattr(self.model, 'lastD', 0) or 2000
+
+        replica_id = request.replicaId if hasattr(request, 'replicaId') else -1
+        print(f"[{ALGORITHM}] GetCurrentParams from replica {replica_id}: "
+              f"BS={batch_size}, BT={batch_timeout}, RT={request_timeout}")
+
+        return monitor_pb2.MetricsResponse(
+            BatchSize=int(batch_size),
+            BatchTimeout=int(batch_timeout),
+            RequestTimeout=int(request_timeout))
+
     def Connect(self, request, context):
         """
         处理 Connect 请求

@@ -423,11 +423,9 @@ public final class TOMLayer extends Thread implements RequestReceiver {
 
                 }
             } else {
-                if (clientsManager.thisReplicaWasRecovered()){
-                    logger.debug("The received TOMMessage " + msg + " was discarded.");
-                } else {
-                    logger.warn("The received TOMMessage " + msg + " was discarded.");
-                }
+                // [DIAG] Always log at INFO for visibility
+                logger.info("[DISCARD] TOMMessage from client {} seq={} session={} was discarded",
+                    msg.getSender(), msg.getSequence(), msg.getSession());
             }
         }
     }

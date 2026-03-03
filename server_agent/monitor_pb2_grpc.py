@@ -39,6 +39,11 @@ class MetricsServiceStub(object):
                 request_serializer=monitor__pb2.MetricsRequest.SerializeToString,
                 response_deserializer=monitor__pb2.MetricsResponse.FromString,
                 _registered_method=True)
+        self.GetCurrentParams = channel.unary_unary(
+                '/MetricsService/GetCurrentParams',
+                request_serializer=monitor__pb2.ParamsRequest.SerializeToString,
+                response_deserializer=monitor__pb2.MetricsResponse.FromString,
+                _registered_method=True)
         self.Connect = channel.unary_unary(
                 '/MetricsService/Connect',
                 request_serializer=monitor__pb2.Timestamp.SerializeToString,
@@ -50,6 +55,12 @@ class MetricsServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def SendMetrics(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetCurrentParams(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -67,6 +78,11 @@ def add_MetricsServiceServicer_to_server(servicer, server):
             'SendMetrics': grpc.unary_unary_rpc_method_handler(
                     servicer.SendMetrics,
                     request_deserializer=monitor__pb2.MetricsRequest.FromString,
+                    response_serializer=monitor__pb2.MetricsResponse.SerializeToString,
+            ),
+            'GetCurrentParams': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetCurrentParams,
+                    request_deserializer=monitor__pb2.ParamsRequest.FromString,
                     response_serializer=monitor__pb2.MetricsResponse.SerializeToString,
             ),
             'Connect': grpc.unary_unary_rpc_method_handler(
@@ -101,6 +117,33 @@ class MetricsService(object):
             target,
             '/MetricsService/SendMetrics',
             monitor__pb2.MetricsRequest.SerializeToString,
+            monitor__pb2.MetricsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetCurrentParams(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/MetricsService/GetCurrentParams',
+            monitor__pb2.ParamsRequest.SerializeToString,
             monitor__pb2.MetricsResponse.FromString,
             options,
             channel_credentials,

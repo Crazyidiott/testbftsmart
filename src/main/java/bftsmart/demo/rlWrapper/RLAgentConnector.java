@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import bftsmart.demo.microbenchmarks.ThroughputLatencyServer;
 import bftsmart.tom.ServiceProxy;
 import bftsmart.tom.ServiceReplica;
+import bftsmart.tom.core.TOMLayer;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
@@ -196,9 +197,17 @@ public class RLAgentConnector {
      * Main loop for monitoring and tuning.
      *
      * <p>Every replica runs this loop.  At each tick the loop checks whether this
-     * replica is the current consensus leader; only the leader submits consensus-agreed
-     * config-change requests.  After a leader change the new leader picks up the role
-     * automatically on its next scheduled tick.
+     * replica is the current consensus leader.
+     * <ul>
+     *   <li><b>Leader</b>: collects metrics and sends them to the Python agent via
+     *       {@code SendMetrics}, which triggers the optimizer's training / update cycle.</li>
+     *   <li><b>Non-leader</b>: calls {@code GetCurrentParams} to fetch the latest
+     *       parameters <em>without</em> triggering any training.  This avoids sending
+     *       duplicate / conflicting metrics to the same optimizer and reduces load
+     *       (especially in single-machine deployment where all replicas share one agent).</li>
+     * </ul>
+     * Both leader and non-leader apply batch parameters locally; only the leader
+     * submits requestTimeout updates via consensus.
      */
     public void startMonitoringLoop() {
         if (!connected) return;
@@ -226,71 +235,17 @@ public class RLAgentConnector {
                 // Sleep for interval
                 Thread.sleep(MONITOR_INTERVAL_MS);
 
-                // 1. Collect Metrics
-                ThroughputLatencyServer.MetricsSnapshot snapshot = serverInstance.getAndResetMetrics();
-                
-                // Calculate throughput (ops/sec) and Avg Latency (ns)
-                double throughput = (double) snapshot.ops * 1000.0 / snapshot.timeWindow;
-                double avgLatencyNs = snapshot.latencySamples > 0 ? (double) snapshot.latencySum / snapshot.latencySamples : 0;
-                // Convert to microseconds (µs) – matches LATENCY_SCALE = 30 000 µs in trainer.py.
-                double avgLatencyUs = avgLatencyNs / 1000.0;
+                MonitorProto.MetricsResponse response;
 
-                // 新增：计算平均消息大小（字节）
-                double avgMessageSize = snapshot.sizeSamples > 0 ? (double) snapshot.totalSize / snapshot.sizeSamples : 0;
-
-                // 新增：计算到达率（请求/秒）
-                double arrivalRate = (double) snapshot.arrivalCount * 1000.0 / snapshot.timeWindow;
-
-                // Memory monitoring
-                Runtime runtime = Runtime.getRuntime();
-                long usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024); // MB
-                long maxMemory = runtime.maxMemory() / (1024 * 1024); // MB
-                long totalMemory = runtime.totalMemory() / (1024 * 1024); // MB
-                double memoryUsagePercent = (double) usedMemory / maxMemory * 100;
-
-                // Debug logging with memory info (updated with new metrics)
-                logger.info(String.format("[Metrics] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us | avgSize=%.0f bytes, arrivalRate=%.2f req/s | Memory: %dMB/%dMB (%.1f%%)",
-                    snapshot.timeWindow, snapshot.ops, snapshot.latencySum, snapshot.latencySamples,
-                    throughput, avgLatencyUs, avgMessageSize, arrivalRate, usedMemory, maxMemory, memoryUsagePercent));
-
-                // Update cumulative / smoothed state for tot_thr, tot_lat, tot_size fields.
-                // These give the Python agent a longer-horizon temporal signal
-                // that is semantically different from the raw per-window values sent in
-                // throughput / latency / size.
-                // EMA of throughput (α=0.2): smoothed over ~5 windows = ~5 s horizon.
-                if (smoothedThroughputOps == 0.0) {
-                    smoothedThroughputOps = throughput;  // cold-start: initialise to first sample
+                if (isCurrentLeader()) {
+                    // ── Leader path: send full metrics to trigger training ────────────
+                    response = sendMetricsAsLeader();
                 } else {
-                    smoothedThroughputOps = 0.8 * smoothedThroughputOps + 0.2 * throughput;
+                    // ── Non-leader path: fetch current params without training ────────
+                    response = fetchParamsAsFollower();
                 }
-                // EMA of latency (α=0.2): smoothed over ~5 windows = ~5 s horizon.
-                if (smoothedLatencyUs == 0.0) {
-                    smoothedLatencyUs = avgLatencyUs;  // cold-start: initialise to first sample
-                } else {
-                    smoothedLatencyUs = 0.8 * smoothedLatencyUs + 0.2 * avgLatencyUs;
-                }
-                cumulativeSizeKB += snapshot.totalSize / 1024;
 
-                // 2. Build Request (updated with size and arrival_rate)
-                MonitorProto.MetricsRequest request = MonitorProto.MetricsRequest.newBuilder()
-                        .setThroughput((int) throughput)
-                        .setLatency((int) avgLatencyUs)
-                        .setSize((int) avgMessageSize)   // avg msg size per window (bytes)
-                        // tot_thr: EMA-smoothed throughput (ops/s) – same unit as throughput field,
-                        //   normalised with THROUGHPUT_SCALE (60 000) on Python side.
-                        .setTotThr((int) smoothedThroughputOps)
-                        // tot_lat: EMA-smoothed latency (µs) – same unit as latency field,
-                        //   normalised with LATENCY_SCALE on Python side.
-                        .setTotLat((int) smoothedLatencyUs)
-                        // tot_size: cumulative total message size (KB) since loop start
-                        //   normalised with 1e9 on Python side.
-                        .setTotSize((int) Math.min(cumulativeSizeKB, Integer.MAX_VALUE))
-                        .setOption(1)                    // Option 1 for Batch Tuning
-                        .setArrivalRate(arrivalRate)     // arrival rate (req/s)
-                        .build();
-
-                // 3. Send RPC
-                MonitorProto.MetricsResponse response = blockingStub.sendMetrics(request);
+                if (response == null) continue;
 
                 // 4. Apply Tuning
                 int newBatchSize    = response.getBatchSize();
@@ -301,41 +256,29 @@ public class RLAgentConnector {
                     monitorLoopCounter++;
 
                     // ── Local parameters: apply directly, no consensus needed ─────────
+                    logger.info("Updating local batch config: maxBatchSize={}, batchTimeout={}",
+                            newBatchSize, newBatchTimeout);
                     serviceReplica.setDynamicConsensusConfig(newBatchSize, newBatchTimeout);
 
                     // ── Consensus parameter: requestTimeout ───────────────────────────
                     // Only the CURRENT consensus leader submits the proposal.
-                    // After a leader change, the new leader takes over automatically.
-                    // All replicas (including the proposer) apply the value when the
-                    // ordered request is delivered via appExecuteBatch().
                     if (newRequestTimeout > 0
-                            && monitorLoopCounter % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0) {
-
-                        if (isCurrentLeader()) {
-                            ensureConfigProxyInitialised();
-                            // Fire invokeOrdered on a daemon thread so the monitoring loop
-                            // is never blocked by consensus I/O (e.g. during leader change).
-                            // proposalInFlight prevents concurrent duplicate proposals.
-                            if (!proposalInFlight.get()) {
-                                final int timeoutToPropose = newRequestTimeout;
-                                proposalInFlight.set(true);  // set BEFORE start to close the race window
-                                Thread proposalThread = new Thread(
-                                    () -> proposeRequestTimeoutViaConsensus(timeoutToPropose));
-                                proposalThread.setDaemon(true);
-                                proposalThread.setName("ConfigProposal-RT-" + timeoutToPropose);
-                                proposalThread.start();
-                            } else {
-                                logger.debug("[ConfigProxy] Replica {}: previous proposal still in-flight, "
-                                        + "skipping requestTimeout={} this tick.",
-                                        replicaId, newRequestTimeout);
-                            }
+                            && monitorLoopCounter % REQUEST_TIMEOUT_UPDATE_INTERVAL == 0
+                            && isCurrentLeader()) {
+                        ensureConfigProxyInitialised();
+                        if (!proposalInFlight.get()) {
+                            final int timeoutToPropose = newRequestTimeout;
+                            proposalInFlight.set(true);
+                            Thread proposalThread = new Thread(
+                                () -> proposeRequestTimeoutViaConsensus(timeoutToPropose));
+                            proposalThread.setDaemon(true);
+                            proposalThread.setName("ConfigProposal-RT-" + timeoutToPropose);
+                            proposalThread.start();
                         } else {
-                            logger.debug("[ConfigProxy] Replica {} is not the leader (leader={}); "
-                                    + "skipping requestTimeout proposal.",
-                                    replicaId, serviceReplica.getCurrentLeader());
+                            logger.debug("[ConfigProxy] Replica {}: previous proposal still in-flight, "
+                                    + "skipping requestTimeout={} this tick.",
+                                    replicaId, newRequestTimeout);
                         }
-                        // Non-leader replicas receive the update through the consensus
-                        // delivery path in appExecuteBatch() – no action needed here.
                     }
                 }
 
@@ -358,7 +301,120 @@ public class RLAgentConnector {
     }
 
     /**
-     * Submits a consensus-agreed {@code requestTimeout} update (replica 0 only).
+     * Leader path: collects local metrics, sends them to the Python agent via
+     * {@code SendMetrics} (which triggers the optimizer's training cycle), and
+     * returns the recommended parameters.
+     */
+    private MonitorProto.MetricsResponse sendMetricsAsLeader() {
+        // 1. Collect Metrics
+        ThroughputLatencyServer.MetricsSnapshot snapshot = serverInstance.getAndResetMetrics();
+
+        // Calculate throughput (ops/sec) and Avg Latency (ns)
+        double throughput = (double) snapshot.ops * 1000.0 / snapshot.timeWindow;
+        double avgLatencyNs = snapshot.latencySamples > 0 ? (double) snapshot.latencySum / snapshot.latencySamples : 0;
+        double avgLatencyUs = avgLatencyNs / 1000.0;
+        double avgMessageSize = snapshot.sizeSamples > 0 ? (double) snapshot.totalSize / snapshot.sizeSamples : 0;
+        double arrivalRate = (double) snapshot.arrivalCount * 1000.0 / snapshot.timeWindow;
+
+        // Memory monitoring
+        Runtime runtime = Runtime.getRuntime();
+        long usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
+        long maxMemory = runtime.maxMemory() / (1024 * 1024);
+        double memoryUsagePercent = (double) usedMemory / maxMemory * 100;
+
+        logger.info(String.format("[Metrics-Leader] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us | avgSize=%.0f bytes, arrivalRate=%.2f req/s | Memory: %dMB/%dMB (%.1f%%)",
+            snapshot.timeWindow, snapshot.ops, snapshot.latencySum, snapshot.latencySamples,
+            throughput, avgLatencyUs, avgMessageSize, arrivalRate, usedMemory, maxMemory, memoryUsagePercent));
+
+        // ── DEBUG: Diagnose proposer stall when ops=0 ──────────────────────
+        if (snapshot.ops == 0) {
+            try {
+                TOMLayer tom = serviceReplica.getReplicaContext()
+                        .getSVController().getTOMLayer();
+                if (tom != null) {
+                    int inExec = tom.getInExec();
+                    int lastExec = tom.getLastExec();
+                    int leader = tom.execManager.getCurrentLeader();
+                    boolean hasPending = tom.clientsManager.havePendingRequests();
+                    boolean batchReady = tom.clientsManager.isNextBatchReady();
+                    boolean stateTransfer = tom.isRetrievingState();
+                    boolean leaderChanging = tom.isChangingLeader();
+                    int numClients = tom.clientsManager.numClients();
+                    long fcDrops = tom.clientsManager.getFlowControlDropCount();
+                    long seqGaps = tom.clientsManager.getSeqGapRejectCount();
+                    String clientSummary = tom.clientsManager.getPendingSummary();
+                    logger.info(String.format(
+                        "[DIAG] inExec=%d lastExec=%d leader=%d pending=%b batchReady=%b "
+                        + "stateTransfer=%b leaderChanging=%b numClients=%d fcDrops=%d seqGaps=%d",
+                        inExec, lastExec, leader, hasPending, batchReady,
+                        stateTransfer, leaderChanging, numClients, fcDrops, seqGaps));
+                    logger.info("[DIAG-CLIENTS] " + clientSummary);
+                }
+            } catch (Exception e) {
+                logger.warn("[DIAG] Failed to read TOMLayer state: " + e.getMessage());
+            }
+        }
+        // ───────────────────────────────────────────────────────────────────
+
+        // EMA smoothing
+        if (smoothedThroughputOps == 0.0) {
+            smoothedThroughputOps = throughput;
+        } else {
+            smoothedThroughputOps = 0.8 * smoothedThroughputOps + 0.2 * throughput;
+        }
+        if (smoothedLatencyUs == 0.0) {
+            smoothedLatencyUs = avgLatencyUs;
+        } else {
+            smoothedLatencyUs = 0.8 * smoothedLatencyUs + 0.2 * avgLatencyUs;
+        }
+        cumulativeSizeKB += snapshot.totalSize / 1024;
+
+        // 2. Build and send request
+        MonitorProto.MetricsRequest request = MonitorProto.MetricsRequest.newBuilder()
+                .setThroughput((int) throughput)
+                .setLatency((int) avgLatencyUs)
+                .setSize((int) avgMessageSize)
+                .setTotThr((int) smoothedThroughputOps)
+                .setTotLat((int) smoothedLatencyUs)
+                .setTotSize((int) Math.min(cumulativeSizeKB, Integer.MAX_VALUE))
+                .setOption(1)
+                .setArrivalRate(arrivalRate)
+                .build();
+
+        return blockingStub.sendMetrics(request);
+    }
+
+    /**
+     * Non-leader path: fetches the current parameters from the Python agent
+     * via {@code GetCurrentParams} <em>without</em> triggering any training
+     * or optimizer state update.  Also drains any metrics accumulated since
+     * the last tick so they don't pile up.
+     */
+    private MonitorProto.MetricsResponse fetchParamsAsFollower() {
+        // Drain metrics accumulated during this interval so counters don't overflow
+        ThroughputLatencyServer.MetricsSnapshot snapshot = serverInstance.getAndResetMetrics();
+
+        double throughput = (double) snapshot.ops * 1000.0 / snapshot.timeWindow;
+        double avgLatencyNs = snapshot.latencySamples > 0 ? (double) snapshot.latencySum / snapshot.latencySamples : 0;
+        double avgLatencyUs = avgLatencyNs / 1000.0;
+
+        Runtime runtime = Runtime.getRuntime();
+        long usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024);
+        long maxMemory = runtime.maxMemory() / (1024 * 1024);
+        double memoryUsagePercent = (double) usedMemory / maxMemory * 100;
+
+        logger.info(String.format("[Metrics-Follower] window=%dms, ops=%d => thr=%.2f, lat=%.2f us | Memory: %dMB/%dMB (%.1f%%)",
+            snapshot.timeWindow, snapshot.ops, throughput, avgLatencyUs, usedMemory, maxMemory, memoryUsagePercent));
+
+        MonitorProto.ParamsRequest request = MonitorProto.ParamsRequest.newBuilder()
+                .setReplicaId(replicaId)
+                .build();
+
+        return blockingStub.getCurrentParams(request);
+    }
+
+    /**
+     * Submits a consensus-agreed {@code requestTimeout} update.
      *
      * <p>The request is encoded with a magic prefix (see {@link ConfigChangeRequest}) and
      * sent as a normal BFT-ordered request via the internal {@link ServiceProxy}.

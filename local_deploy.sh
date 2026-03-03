@@ -292,12 +292,12 @@ cd "${LOCAL_PROJECT_PATH}"
 if [ -n "${WORKLOAD_CONFIG_NAME}" ]; then
     CLIENT_PROCESS_NAME="AsyncDynamicClient"
     WORKLOAD_ARGS="config/workloads/${WORKLOAD_CONFIG_NAME}"
-    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncDynamicClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} ${WORKLOAD_ARGS} \
+    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncDynamicClient 1001 10 20000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} ${WORKLOAD_ARGS} \
         > client.log 2>&1 &
     echo "    [Info] Using AsyncDynamicClient with config: ${WORKLOAD_CONFIG_NAME} (PID: $!)"
 else
     CLIENT_PROCESS_NAME="AsyncLatencyClient"
-    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} \
+    nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 20000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} \
         > client.log 2>&1 &
     echo "    [Info] Using Standard AsyncLatencyClient (PID: $!)"
 fi
@@ -357,6 +357,8 @@ ps -ef | grep 'smartrun.sh' | grep -v 'grep' | grep -v 'bash -c' | awk '{print $
 
 # Kill RL agents
 ps -ef | grep 'python3.*trainer.py\|python3.*mock_agent.py' | grep -v 'grep' | grep -v 'bash -c' | awk '{print $2}' | xargs -r kill -9 2>/dev/null
+# Suppress bash "Killed" job notification for background processes
+wait 2>/dev/null
 
 echo "    All servers and agents stopped."
 

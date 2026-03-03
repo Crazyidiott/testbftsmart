@@ -18,6 +18,7 @@ package bftsmart.clientsmanagement;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map.Entry;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import bftsmart.communication.ServerCommunicationSystem;
 import bftsmart.reconfiguration.ServerViewController;
@@ -58,6 +59,10 @@ public class ClientsManager {
     private ReentrantLock clientsLock = new ReentrantLock();
 
     private long startTime = -1;
+
+    // [DIAG] Flow control drop counter
+    private AtomicLong flowControlDropCount = new AtomicLong(0);
+    private AtomicLong seqGapRejectCount = new AtomicLong(0);
 
     public ClientsManager(ServerViewController controller, RequestsTimer timer, RequestVerifier verifier, ServerCommunicationSystem cs) {
         this.controller = controller;
@@ -345,22 +350,23 @@ public class ClientsManager {
                 //clients should not have more than defined in the config file
                 //outstanding messages, otherwise they will be dropped.
                 
-                //just account for the message reception //why is this necessary?
-                //Scenario: A faulty client sends its request to the leader first which will discard the message due to a full queue.
-                //          Then the client sends the message delayed (queue is now not full) to the followers, which will forward the message to the leader after the timeout.
-                //          The leader then would reject the message, because it already accounted for the message reception. -> leader change
-                //clientData.setLastMessageReceived(request.getSequence());
-                //clientData.setLastMessageReceivedTime(request.receptionTime);
+                //just account for the message reception
+                //This is necessary to keep sequence numbers continuous when a request is dropped by flow control.
+                //Without this, all subsequent requests from this client will be rejected due to a sequence gap.
+                //Note: Original code had this commented out due to a concern about a faulty client causing a leader change,
+                //but that scenario is far less damaging than the permanent client death caused by sequence gaps under normal load.
+                clientData.setLastMessageReceived(request.getSequence());
+                clientData.setLastMessageReceivedTime(request.receptionTime);
 
 
                 clientData.clientLock.unlock();
                 String source = fromClient ? "client" : "forwarded";
-                if (!thisReplicaWasRecovered()) {
-                    logger.warn("Request from {} ({}) dropped due to flow control (pending={}, limit={})", 
-                        request.getSender(), source, pendingSize, effectiveLimit);
-                } else {
-                    logger.debug("Request from {} ({}) dropped due to flow control (pending={}, limit={})", 
-                        request.getSender(), source, pendingSize, effectiveLimit);
+                long dropCount = flowControlDropCount.incrementAndGet();
+                // [DIAG] Always log at INFO to ensure visibility
+                if (dropCount <= 20 || dropCount % 1000 == 0) {
+                    logger.info("[FLOW-CTRL] Request seq={} from client {} ({}) DROPPED (pending={}, limit={}, lastRecv={}). Total drops={}",
+                        request.getSequence(), request.getSender(), source, pendingSize, effectiveLimit,
+                        clientData.getLastMessageReceived(), dropCount);
                 }
                 return false;
             }
@@ -449,10 +455,14 @@ public class ClientsManager {
                 }
                 accounted = true;
             } else {
-                if (!thisReplicaWasRecovered())
-                    logger.warn("Message from client {} is too forward", clientData.getClientId());
-                    //a too forward message... the client must be malicious
-                    // this scenarios can also occur under a correct client if a replica recovers
+                long gapCount = seqGapRejectCount.incrementAndGet();
+                // [DIAG] Always log at INFO - this is likely the root cause of stalls
+                if (gapCount <= 20 || gapCount % 1000 == 0) {
+                    logger.info("[SEQ-GAP] Client {} request seq={} REJECTED: lastReceived={}, expected={}. Total gaps={}",
+                        clientData.getClientId(), request.getSequence(),
+                        clientData.getLastMessageReceived(),
+                        clientData.getLastMessageReceived() + 1, gapCount);
+                }
                 accounted = false;
             }
         }
@@ -659,5 +669,31 @@ public class ClientsManager {
         return ! (System.currentTimeMillis() / 1000L - startTime > 20000) ;
     }
 
+    /**
+     * [DIAG] Returns a summary string of per-client pending request counts.
+     */
+    public String getPendingSummary() {
+        StringBuilder sb = new StringBuilder();
+        clientsLock.lock();
+        try {
+            for (Entry<Integer, ClientData> entry : clientsData.entrySet()) {
+                ClientData cd = entry.getValue();
+                cd.clientLock.lock();
+                int pending = cd.getPendingRequests().size();
+                long lastRecv = cd.getLastMessageReceived();
+                long lastDeliv = cd.getLastMessageDelivered();
+                cd.clientLock.unlock();
+                sb.append(String.format("c%d(p=%d,lr=%d,ld=%d) ", entry.getKey(), pending, lastRecv, lastDeliv));
+            }
+        } finally {
+            clientsLock.unlock();
+        }
+        return sb.toString().trim();
+    }
+
+    /** [DIAG] Get total flow control drops */
+    public long getFlowControlDropCount() { return flowControlDropCount.get(); }
+    /** [DIAG] Get total sequence gap rejections */
+    public long getSeqGapRejectCount() { return seqGapRejectCount.get(); }
 
 }

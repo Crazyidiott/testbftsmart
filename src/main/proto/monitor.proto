@@ -5,7 +5,12 @@ option java_outer_classname = "MonitorProto";
 
 service MetricsService {
     rpc SendMetrics (MetricsRequest) returns (MetricsResponse);
+    rpc GetCurrentParams (ParamsRequest) returns (MetricsResponse);
     rpc Connect (Timestamp) returns (Timestamp);
+}
+
+message ParamsRequest {
+    int32 replicaId = 1;
 }
 
 message MetricsRequest {
