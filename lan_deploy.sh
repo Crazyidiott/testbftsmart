@@ -284,7 +284,7 @@ for i in {0..3}; do
             echo '    [STATIC MODE] Starting Python Agent with STATIC algorithm for metrics output...'
             echo '    Using BatchSize=${MAX_BATCH_SIZE}, BatchTimeout=${TIMEOUT_VAL}'
             if [ -f rlenv/bin/python3 ]; then
-                 nohup env OPT_ALGORITHM=STATIC STATIC_BATCH_SIZE=${MAX_BATCH_SIZE} STATIC_BATCH_TIMEOUT=${TIMEOUT_VAL} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
+                 nohup env OPT_ALGORITHM=STATIC STATIC_BATCH_SIZE=${MAX_BATCH_SIZE} STATIC_BATCH_TIMEOUT=${TIMEOUT_VAL} ./rlenv/bin/python3 -u trainer.py > agent_$i.log 2>&1 &
                  echo '    Python Agent started with STATIC algorithm (fixed parameters, metrics enabled)'
             else
                  echo '    ERROR: rlenv/bin/python3 NOT FOUND. Agent cannot start.'
@@ -294,7 +294,7 @@ for i in {0..3}; do
         elif [ \"${ALG_NAME}\" == \"MOCK\" ]; then
             echo '    [Remote] Launching Mock Agent...'
             if [ -f rlenv/bin/python3 ]; then
-                 nohup ./rlenv/bin/python3 mock_agent.py --mode fixed > agent_$i.log 2>&1 &
+                 nohup ./rlenv/bin/python3 -u mock_agent.py --mode fixed > agent_$i.log 2>&1 &
                  echo '    Mock Agent started (fixed mode)'
             else
                  echo '    ERROR: rlenv/bin/python3 NOT FOUND. Agent cannot start.'
@@ -304,7 +304,7 @@ for i in {0..3}; do
         else
             echo '    [Remote] Launching Python Agent...'
             if [ -f rlenv/bin/python3 ]; then
-                 nohup env OPT_ALGORITHM=${ALG_NAME} ./rlenv/bin/python3 trainer.py > agent_$i.log 2>&1 &
+                 nohup env OPT_ALGORITHM=${ALG_NAME} ./rlenv/bin/python3 -u trainer.py > agent_$i.log 2>&1 &
                  echo '    Python Agent started with algorithm: ${ALG_NAME}'
             else
                  echo '    ERROR: rlenv/bin/python3 NOT FOUND. Agent cannot start.'
