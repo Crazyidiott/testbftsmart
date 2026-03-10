@@ -86,6 +86,11 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
     private AtomicLong timeBasedSizeSamples = new AtomicLong(0);    // 消息数量（用于计算平均大小）
     // =============================================
 
+    // ============ 共识轮延迟统计 ============
+    private AtomicLong timeBasedConsensusLatency = new AtomicLong(0);   // 累计共识延迟 (ns)
+    private AtomicLong timeBasedConsensusLatSamples = new AtomicLong(0); // 共识延迟样本数
+    // =============================================
+
     // ============ Goodput 统计器 ============
     // 总处理消息数（不含重复，用于计算 Goodput）
     private AtomicLong totalGoodputOps = new AtomicLong(0);
@@ -106,15 +111,20 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         // 新增字段
         public long totalSize;       // 累计消息大小（字节）
         public long sizeSamples;     // 消息数量
+        public long consensusLatencySum;   // 累计共识延迟 (ns)
+        public long consensusLatSamples;   // 共识延迟样本数
 
         public MetricsSnapshot(long ops, long latencySum, long latencySamples, long timeWindow,
-                               long totalSize, long sizeSamples) {
+                               long totalSize, long sizeSamples,
+                               long consensusLatencySum, long consensusLatSamples) {
             this.ops = ops;
             this.latencySum = latencySum;
             this.latencySamples = latencySamples;
             this.timeWindow = timeWindow;
             this.totalSize = totalSize;
             this.sizeSamples = sizeSamples;
+            this.consensusLatencySum = consensusLatencySum;
+            this.consensusLatSamples = consensusLatSamples;
         }
     }
 
@@ -133,9 +143,13 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
         long totalSize = timeBasedTotalSize.getAndSet(0);
         long sizeSamp = timeBasedSizeSamples.getAndSet(0);
 
+        // 新增：重置共识延迟统计
+        long consLatSum = timeBasedConsensusLatency.getAndSet(0);
+        long consLatSamp = timeBasedConsensusLatSamples.getAndSet(0);
+
         lastMetricsResetTime = now;
 
-        return new MetricsSnapshot(ops, latSum, latSamp, window, totalSize, sizeSamp);
+        return new MetricsSnapshot(ops, latSum, latSamp, window, totalSize, sizeSamp, consLatSum, consLatSamp);
     }
 
     // ============ Goodput 统计方法 ============
@@ -421,7 +435,10 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
 
             if (readOnly == false) {
 
-                consensusLatency.store(msgCtx.getFirstInBatch().decisionTime - msgCtx.getFirstInBatch().consensusStartTime);
+                long consLat = msgCtx.getFirstInBatch().decisionTime - msgCtx.getFirstInBatch().consensusStartTime;
+                consensusLatency.store(consLat);
+                timeBasedConsensusLatency.addAndGet(consLat);
+                timeBasedConsensusLatSamples.incrementAndGet();
                 long temp = msgCtx.getFirstInBatch().consensusStartTime - msgCtx.getFirstInBatch().receptionTime;
                 preConsLatency.store(temp > 0 ? temp : 0);
                 posConsLatency.store(msgCtx.getFirstInBatch().executedTime - msgCtx.getFirstInBatch().decisionTime);            

@@ -138,6 +138,7 @@ REWARD_SCALE = 100000.0       # Reward 归一化因子
 # 使用归一化后的值计算，权重更平衡
 c_thr = 1.0       # 吞吐量权重
 c_lat = -1.0      # 延迟权重 (使用归一化后的值，不需要 -100 这么大)
+drop_penalty_weight = 0.5  # Drop 惩罚权重
 
 # ============= 节点地址配置 =============
 # 从 lan_config.sh 动态读取
@@ -157,7 +158,7 @@ save_episode = 500
 def Normalized(state):
     """
     状态归一化 - 基于实际观测数据设置上限
-    state: [throughput, latency, payload, tot_thr, tot_lat, tot_size, arrival_rate]
+    state: [throughput, latency, payload, tot_thr, tot_lat, tot_size, arrival_rate, total_drops, consensus_latency]
     其中 tot_thr/tot_lat/tot_size 均为 EMA 平滑值，与对应的瞬时值同单位。
     """
     max_vals = np.array([
@@ -168,6 +169,8 @@ def Normalized(state):
         LATENCY_SCALE,       # index 4: tot_lat (EMA 平滑延迟 µs，单位与 latency 相同)
         10000.0,             # index 5: tot_size (EMA 平滑消息大小 bytes，与 payload 同量级)
         THROUGHPUT_SCALE,    # index 6: arrival_rate (到达率 req/s，同吞吐量量级)
+        THROUGHPUT_SCALE,    # index 7: total_drops (每窗口丢弃总数，上限同吞吐量量级)
+        LATENCY_SCALE,       # index 8: consensus_latency (共识轮延迟 µs，与 latency 同量级)
     ])
     return state / (max_vals[:len(state)] + 1e-8)
 
@@ -1106,8 +1109,8 @@ class PPO(nn.Module, OptimizerBase):
         self.data = []
         self.timeout_data = []  # requestTimeout 的独立经验缓冲区
 
-        # 输入维度: [throughput, latency, size, tot_thr, tot_lat, tot_size, arrival_rate]
-        input_dims = 7
+        # 输入维度: [throughput, latency, size, tot_thr, tot_lat, tot_size, arrival_rate, total_drops, consensus_latency]
+        input_dims = 9
 
         # ── Batch 子网络 (1s 频率) ──────────────────────────────────────────
         # 负责决策 batchSize / batchTimeout / C，和对应的价値函数
@@ -1411,7 +1414,8 @@ class PPO(nn.Module, OptimizerBase):
         completion_rate = min(float(self.old_state[0]) / arrival, 1.0)
         norm_lat        = float(self.old_state[1]) / LATENCY_SCALE
         backlog_penalty = max(0.0, (arrival - float(self.old_state[0])) / THROUGHPUT_SCALE)
-        reward = completion_rate - norm_lat - backlog_penalty
+        drop_ratio      = float(self.old_state[7]) / arrival
+        reward = completion_rate - norm_lat - backlog_penalty - drop_penalty_weight * drop_ratio
 
         norm_state = Normalized(self.old_state)
         with torch.no_grad():
@@ -1952,7 +1956,8 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
         out_queue_drops = getattr(request, 'out_queue_drops', 0)
         oversized_drops = getattr(request, 'oversized_drops', 0)
         total_drops = flow_control_drops + seq_gap_rejects + in_queue_drops + out_queue_drops + oversized_drops
-        print(f"[Metrics] thr={throughput}, lat={latency}, arrival_rate={arrival_rate:.2f}, "
+        consensus_latency = getattr(request, 'consensus_latency', 0)
+        print(f"[Metrics] thr={throughput}, lat={latency}, consLat={consensus_latency}, arrival_rate={arrival_rate:.2f}, "
               f"drops: fc={flow_control_drops} sg={seq_gap_rejects} iq={in_queue_drops} oq={out_queue_drops} os={oversized_drops} total={total_drops}")
         
         # 计算当前 reward (与 modelUpdate 中的公式一致)
@@ -1961,7 +1966,8 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
             completion_rate = min(float(throughput) / arrival, 1.0)
             norm_lat = float(latency) / LATENCY_SCALE
             backlog_penalty = max(0.0, (arrival - float(throughput)) / THROUGHPUT_SCALE)
-            current_reward = completion_rate - norm_lat - backlog_penalty
+            drop_ratio = float(total_drops) / arrival
+            current_reward = completion_rate - norm_lat - backlog_penalty - drop_penalty_weight * drop_ratio
         else:
             current_reward = 0
         self.data_logger.log_metrics(throughput, latency, payload, current_reward,
@@ -1972,9 +1978,10 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
                                      out_queue_drops=out_queue_drops,
                                      oversized_drops=oversized_drops)
         
-        # ========== 构造状态 ==========
+        # ========== 构造状态 (9D) ==========
         new_state = np.array([request.throughput, request.latency, request.size,
-                              request.tot_thr, request.tot_lat, request.tot_size, request.arrival_rate])
+                              request.tot_thr, request.tot_lat, request.tot_size, request.arrival_rate,
+                              total_drops, consensus_latency])
         
         action_pool.clear()
         

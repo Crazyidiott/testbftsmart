@@ -316,6 +316,8 @@ public class RLAgentConnector {
         double avgLatencyNs = snapshot.latencySamples > 0 ? (double) snapshot.latencySum / snapshot.latencySamples : 0;
         double avgLatencyUs = avgLatencyNs / 1000.0;
         double avgMessageSize = snapshot.sizeSamples > 0 ? (double) snapshot.totalSize / snapshot.sizeSamples : 0;
+        double avgConsensusLatencyNs = snapshot.consensusLatSamples > 0 ? (double) snapshot.consensusLatencySum / snapshot.consensusLatSamples : 0;
+        double avgConsensusLatencyUs = avgConsensusLatencyNs / 1000.0;
 
         // Memory monitoring
         Runtime runtime = Runtime.getRuntime();
@@ -344,9 +346,9 @@ public class RLAgentConnector {
         double arrivalRate = (double) trueArrivalCount * 1000.0 / snapshot.timeWindow;
         long totalDrops = flowControlDrops + seqGapRejects + inQueueDrops + outQueueDrops + oversizedDrops;
 
-        logger.info(String.format("[Metrics-Leader] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us | avgSize=%.0f bytes, arrivalRate=%.2f req/s | Memory: %dMB/%dMB (%.1f%%) | drops: fc=%d sg=%d iq=%d oq=%d os=%d",
+        logger.info(String.format("[Metrics-Leader] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us, consLat=%.2f us | avgSize=%.0f bytes, arrivalRate=%.2f req/s | Memory: %dMB/%dMB (%.1f%%) | drops: fc=%d sg=%d iq=%d oq=%d os=%d",
             snapshot.timeWindow, snapshot.ops, snapshot.latencySum, snapshot.latencySamples,
-            throughput, avgLatencyUs, avgMessageSize, arrivalRate, usedMemory, maxMemory, memoryUsagePercent,
+            throughput, avgLatencyUs, avgConsensusLatencyUs, avgMessageSize, arrivalRate, usedMemory, maxMemory, memoryUsagePercent,
             flowControlDrops, seqGapRejects, inQueueDrops, outQueueDrops, oversizedDrops));
         // ─────────────────────────────────────────────────────────────────
 
@@ -412,6 +414,7 @@ public class RLAgentConnector {
                 .setInQueueDrops(inQueueDrops)
                 .setOutQueueDrops(outQueueDrops)
                 .setOversizedDrops(oversizedDrops)
+                .setConsensusLatency((int) avgConsensusLatencyUs)
                 .build();
 
         return blockingStub.sendMetrics(request);

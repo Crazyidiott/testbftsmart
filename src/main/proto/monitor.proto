@@ -28,6 +28,8 @@ message MetricsRequest {
     int64 in_queue_drops = 11;
     int64 out_queue_drops = 12;
     int64 oversized_drops = 13;
+    // Consensus round latency (avg, in microseconds)
+    int32 consensus_latency = 14;
 }
 
 message MetricsResponse {

@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rmonitor.proto\"\"\n\rParamsRequest\x12\x11\n\treplicaId\x18\x01 \x01(\x05\"\x9c\x02\n\x0eMetricsRequest\x12\x12\n\nthroughput\x18\x01 \x01(\x05\x12\x0f\n\x07latency\x18\x02 \x01(\x05\x12\x0c\n\x04size\x18\x03 \x01(\x05\x12\x0f\n\x07tot_thr\x18\x04 \x01(\x05\x12\x0f\n\x07tot_lat\x18\x05 \x01(\x05\x12\x10\n\x08tot_size\x18\x06 \x01(\x05\x12\x0e\n\x06option\x18\x07 \x01(\x05\x12\x14\n\x0c\x61rrival_rate\x18\x08 \x01(\x01\x12\x1a\n\x12\x66low_control_drops\x18\t \x01(\x03\x12\x17\n\x0fseq_gap_rejects\x18\n \x01(\x03\x12\x16\n\x0ein_queue_drops\x18\x0b \x01(\x03\x12\x17\n\x0fout_queue_drops\x18\x0c \x01(\x03\x12\x17\n\x0foversized_drops\x18\r \x01(\x03\"R\n\x0fMetricsResponse\x12\x11\n\tBatchSize\x18\x01 \x01(\x05\x12\x14\n\x0c\x42\x61tchTimeout\x18\x02 \x01(\x05\x12\x16\n\x0eRequestTimeout\x18\x03 \x01(\x05\"\x1e\n\tTimestamp\x12\x11\n\ttimestamp\x18\x01 \x01(\x03\x32\x9b\x01\n\x0eMetricsService\x12\x30\n\x0bSendMetrics\x12\x0f.MetricsRequest\x1a\x10.MetricsResponse\x12\x34\n\x10GetCurrentParams\x12\x0e.ParamsRequest\x1a\x10.MetricsResponse\x12!\n\x07\x43onnect\x12\n.Timestamp\x1a\n.TimestampB\'\n\x17\x62\x66tsmart.demo.rlWrapperB\x0cMonitorProtob\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\rmonitor.proto\"\"\n\rParamsRequest\x12\x11\n\treplicaId\x18\x01 \x01(\x05\"\xb7\x02\n\x0eMetricsRequest\x12\x12\n\nthroughput\x18\x01 \x01(\x05\x12\x0f\n\x07latency\x18\x02 \x01(\x05\x12\x0c\n\x04size\x18\x03 \x01(\x05\x12\x0f\n\x07tot_thr\x18\x04 \x01(\x05\x12\x0f\n\x07tot_lat\x18\x05 \x01(\x05\x12\x10\n\x08tot_size\x18\x06 \x01(\x05\x12\x0e\n\x06option\x18\x07 \x01(\x05\x12\x14\n\x0c\x61rrival_rate\x18\x08 \x01(\x01\x12\x1a\n\x12\x66low_control_drops\x18\t \x01(\x03\x12\x17\n\x0fseq_gap_rejects\x18\n \x01(\x03\x12\x16\n\x0ein_queue_drops\x18\x0b \x01(\x03\x12\x17\n\x0fout_queue_drops\x18\x0c \x01(\x03\x12\x17\n\x0foversized_drops\x18\r \x01(\x03\x12\x19\n\x11\x63onsensus_latency\x18\x0e \x01(\x05\"R\n\x0fMetricsResponse\x12\x11\n\tBatchSize\x18\x01 \x01(\x05\x12\x14\n\x0c\x42\x61tchTimeout\x18\x02 \x01(\x05\x12\x16\n\x0eRequestTimeout\x18\x03 \x01(\x05\"\x1e\n\tTimestamp\x12\x11\n\ttimestamp\x18\x01 \x01(\x03\x32\x9b\x01\n\x0eMetricsService\x12\x30\n\x0bSendMetrics\x12\x0f.MetricsRequest\x1a\x10.MetricsResponse\x12\x34\n\x10GetCurrentParams\x12\x0e.ParamsRequest\x1a\x10.MetricsResponse\x12!\n\x07\x43onnect\x12\n.Timestamp\x1a\n.TimestampB\'\n\x17\x62\x66tsmart.demo.rlWrapperB\x0cMonitorProtob\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,11 +35,11 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_PARAMSREQUEST']._serialized_start=17
   _globals['_PARAMSREQUEST']._serialized_end=51
   _globals['_METRICSREQUEST']._serialized_start=54
-  _globals['_METRICSREQUEST']._serialized_end=338
-  _globals['_METRICSRESPONSE']._serialized_start=340
-  _globals['_METRICSRESPONSE']._serialized_end=422
-  _globals['_TIMESTAMP']._serialized_start=424
-  _globals['_TIMESTAMP']._serialized_end=454
-  _globals['_METRICSSERVICE']._serialized_start=457
-  _globals['_METRICSSERVICE']._serialized_end=612
+  _globals['_METRICSREQUEST']._serialized_end=365
+  _globals['_METRICSRESPONSE']._serialized_start=367
+  _globals['_METRICSRESPONSE']._serialized_end=449
+  _globals['_TIMESTAMP']._serialized_start=451
+  _globals['_TIMESTAMP']._serialized_end=481
+  _globals['_METRICSSERVICE']._serialized_start=484
+  _globals['_METRICSSERVICE']._serialized_end=639
 # @@protoc_insertion_point(module_scope)
