@@ -111,11 +111,11 @@ public class RLAgentConnector {
     private double smoothedLatencyUs = 0.0;
 
     /**
-     * Cumulative total message size since the monitoring loop started, in <em>kilobytes</em>
-     * (divided by 1024 to avoid int32 overflow).
-     * Sent as {@code tot_size} (normalised with 1e9 on the Python side).
+     * Exponentially-weighted moving average of per-window average message size (bytes), α = 0.2.
+     * Provides a smoothed signal of the current request size distribution.
+     * Sent as {@code tot_size}; same unit (bytes) as the {@code size} field.
      */
-    private long cumulativeSizeKB = 0;    // ─────────────────────────────────────────────────────────────────────────
+    private double smoothedMessageSize = 0.0;    // ─────────────────────────────────────────────────────────────────────────
 
     public RLAgentConnector(ServiceReplica serviceReplica, ThroughputLatencyServer serverInstance) {
         this.serviceReplica = serviceReplica;
@@ -391,7 +391,11 @@ public class RLAgentConnector {
         } else {
             smoothedLatencyUs = 0.8 * smoothedLatencyUs + 0.2 * avgLatencyUs;
         }
-        cumulativeSizeKB += snapshot.totalSize / 1024;
+        if (smoothedMessageSize == 0.0) {
+            smoothedMessageSize = avgMessageSize;
+        } else {
+            smoothedMessageSize = 0.8 * smoothedMessageSize + 0.2 * avgMessageSize;
+        }
 
         // 2. Build and send request
         MonitorProto.MetricsRequest request = MonitorProto.MetricsRequest.newBuilder()
@@ -400,7 +404,7 @@ public class RLAgentConnector {
                 .setSize((int) avgMessageSize)
                 .setTotThr((int) smoothedThroughputOps)
                 .setTotLat((int) smoothedLatencyUs)
-                .setTotSize((int) Math.min(cumulativeSizeKB, Integer.MAX_VALUE))
+                .setTotSize((int) smoothedMessageSize)
                 .setOption(1)
                 .setArrivalRate(arrivalRate)
                 .setFlowControlDrops(flowControlDrops)

@@ -158,6 +158,7 @@ def Normalized(state):
     """
     状态归一化 - 基于实际观测数据设置上限
     state: [throughput, latency, payload, tot_thr, tot_lat, tot_size, arrival_rate]
+    其中 tot_thr/tot_lat/tot_size 均为 EMA 平滑值，与对应的瞬时值同单位。
     """
     max_vals = np.array([
         THROUGHPUT_SCALE,    # index 0: throughput (每窗口瞬时 ops/s，上限 ~60k)
@@ -165,7 +166,7 @@ def Normalized(state):
         10000.0,             # index 2: payload (每消息平均字节，上限 ~10KB)
         THROUGHPUT_SCALE,    # index 3: tot_thr (EMA 平滑吞吐量 ops/s，与 index 0 同量级)
         LATENCY_SCALE,       # index 4: tot_lat (EMA 平滑延迟 µs，单位与 latency 相同)
-        1e9,                 # index 5: tot_size (累计消息字节数 KB，随实验时间增长)
+        10000.0,             # index 5: tot_size (EMA 平滑消息大小 bytes，与 payload 同量级)
         THROUGHPUT_SCALE,    # index 6: arrival_rate (到达率 req/s，同吞吐量量级)
     ])
     return state / (max_vals[:len(state)] + 1e-8)
@@ -1954,11 +1955,13 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
         print(f"[Metrics] thr={throughput}, lat={latency}, arrival_rate={arrival_rate:.2f}, "
               f"drops: fc={flow_control_drops} sg={seq_gap_rejects} iq={in_queue_drops} oq={out_queue_drops} os={oversized_drops} total={total_drops}")
         
-        # 计算当前 reward (使用归一化值)
+        # 计算当前 reward (与 modelUpdate 中的公式一致)
         if throughput > 0:
-            norm_thr = throughput / THROUGHPUT_SCALE
-            norm_lat = latency / LATENCY_SCALE
-            current_reward = c_thr * norm_thr + c_lat * norm_lat
+            arrival = max(float(arrival_rate), 1.0)
+            completion_rate = min(float(throughput) / arrival, 1.0)
+            norm_lat = float(latency) / LATENCY_SCALE
+            backlog_penalty = max(0.0, (arrival - float(throughput)) / THROUGHPUT_SCALE)
+            current_reward = completion_rate - norm_lat - backlog_penalty
         else:
             current_reward = 0
         self.data_logger.log_metrics(throughput, latency, payload, current_reward,
