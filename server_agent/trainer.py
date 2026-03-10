@@ -213,7 +213,10 @@ class DataLogger:
         with open(self.metrics_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['timestamp', 'iteration', 'throughput', 'latency', 
-                           'avg_latency', 'payload', 'reward'])
+                           'avg_latency', 'payload', 'reward', 'arrival_rate',
+                           'flow_control_drops', 'seq_gap_rejects',
+                           'in_queue_drops', 'out_queue_drops', 'oversized_drops',
+                           'total_drops'])
         
         with open(self.params_file, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -239,16 +242,23 @@ class DataLogger:
                             'switch_count', 'elapsed_since_start', 'elapsed_since_switch',
                             'current_batch_size', 'current_batch_timeout'])
     
-    def log_metrics(self, throughput, latency, payload, reward=None):
+    def log_metrics(self, throughput, latency, payload, reward=None,
+                     arrival_rate=0, flow_control_drops=0, seq_gap_rejects=0,
+                     in_queue_drops=0, out_queue_drops=0, oversized_drops=0):
         """记录性能指标"""
         self.iteration_count += 1
         timestamp = datetime.now().isoformat()
         avg_latency = latency / throughput if throughput > 0 else 0
+        total_drops = flow_control_drops + seq_gap_rejects + in_queue_drops + out_queue_drops + oversized_drops
         
         with open(self.metrics_file, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([timestamp, self.iteration_count, throughput, latency, 
-                           avg_latency, payload, reward if reward else 0])
+                           avg_latency, payload, reward if reward else 0,
+                           arrival_rate,
+                           flow_control_drops, seq_gap_rejects,
+                           in_queue_drops, out_queue_drops, oversized_drops,
+                           total_drops])
     
     def log_parameters(self, batch_size, batch_timeout, c_param, option, request_timeout=0):
         """记录参数调整"""
@@ -1941,10 +1951,8 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
         out_queue_drops = getattr(request, 'out_queue_drops', 0)
         oversized_drops = getattr(request, 'oversized_drops', 0)
         total_drops = flow_control_drops + seq_gap_rejects + in_queue_drops + out_queue_drops + oversized_drops
-        if total_drops > 0:
-            print(f"[Drops] flowCtrl={flow_control_drops}, seqGap={seq_gap_rejects}, "
-                  f"inQueue={in_queue_drops}, outQueue={out_queue_drops}, "
-                  f"oversized={oversized_drops}, total={total_drops}")
+        print(f"[Metrics] thr={throughput}, lat={latency}, arrival_rate={arrival_rate:.2f}, "
+              f"drops: fc={flow_control_drops} sg={seq_gap_rejects} iq={in_queue_drops} oq={out_queue_drops} os={oversized_drops} total={total_drops}")
         
         # 计算当前 reward (使用归一化值)
         if throughput > 0:
@@ -1953,7 +1961,13 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
             current_reward = c_thr * norm_thr + c_lat * norm_lat
         else:
             current_reward = 0
-        self.data_logger.log_metrics(throughput, latency, payload, current_reward)
+        self.data_logger.log_metrics(throughput, latency, payload, current_reward,
+                                     arrival_rate=arrival_rate,
+                                     flow_control_drops=flow_control_drops,
+                                     seq_gap_rejects=seq_gap_rejects,
+                                     in_queue_drops=in_queue_drops,
+                                     out_queue_drops=out_queue_drops,
+                                     oversized_drops=oversized_drops)
         
         # ========== 构造状态 ==========
         new_state = np.array([request.throughput, request.latency, request.size,

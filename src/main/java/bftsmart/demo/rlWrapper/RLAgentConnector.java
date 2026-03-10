@@ -5,9 +5,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import bftsmart.demo.microbenchmarks.ThroughputLatencyServer;
 import bftsmart.communication.client.netty.NettyTOMMessageDecoder;
 import bftsmart.communication.server.ServerConnection;
+import bftsmart.demo.microbenchmarks.ThroughputLatencyServer;
 import bftsmart.tom.ServiceProxy;
 import bftsmart.tom.ServiceReplica;
 import bftsmart.tom.core.TOMLayer;
@@ -344,13 +344,10 @@ public class RLAgentConnector {
         double arrivalRate = (double) trueArrivalCount * 1000.0 / snapshot.timeWindow;
         long totalDrops = flowControlDrops + seqGapRejects + inQueueDrops + outQueueDrops + oversizedDrops;
 
-        logger.info(String.format("[Metrics-Leader] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us | avgSize=%.0f bytes, arrivalRate=%.2f req/s | Memory: %dMB/%dMB (%.1f%%)",
+        logger.info(String.format("[Metrics-Leader] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us | avgSize=%.0f bytes, arrivalRate=%.2f req/s | Memory: %dMB/%dMB (%.1f%%) | drops: fc=%d sg=%d iq=%d oq=%d os=%d",
             snapshot.timeWindow, snapshot.ops, snapshot.latencySum, snapshot.latencySamples,
-            throughput, avgLatencyUs, avgMessageSize, arrivalRate, usedMemory, maxMemory, memoryUsagePercent));
-        if (totalDrops > 0) {
-            logger.info(String.format("[Drops] flowCtrl=%d, seqGap=%d, inQueue=%d, outQueue=%d, oversized=%d, total=%d",
-                flowControlDrops, seqGapRejects, inQueueDrops, outQueueDrops, oversizedDrops, totalDrops));
-        }
+            throughput, avgLatencyUs, avgMessageSize, arrivalRate, usedMemory, maxMemory, memoryUsagePercent,
+            flowControlDrops, seqGapRejects, inQueueDrops, outQueueDrops, oversizedDrops));
         // ─────────────────────────────────────────────────────────────────
 
         // ── DEBUG: Diagnose proposer stall when ops=0 ──────────────────────
@@ -435,9 +432,6 @@ public class RLAgentConnector {
         long maxMemory = runtime.maxMemory() / (1024 * 1024);
         double memoryUsagePercent = (double) usedMemory / maxMemory * 100;
 
-        logger.info(String.format("[Metrics-Follower] window=%dms, ops=%d => thr=%.2f, lat=%.2f us | Memory: %dMB/%dMB (%.1f%%)",
-            snapshot.timeWindow, snapshot.ops, throughput, avgLatencyUs, usedMemory, maxMemory, memoryUsagePercent));
-
         // Drain drop counters and arrival count on follower side too
         long flowControlDrops = 0;
         long seqGapRejects = 0;
@@ -455,11 +449,10 @@ public class RLAgentConnector {
         } catch (Exception e) {
             logger.debug("Failed to read drop counters: " + e.getMessage());
         }
-        long totalDrops = flowControlDrops + seqGapRejects + inQueueDrops + outQueueDrops + oversizedDrops;
-        if (totalDrops > 0) {
-            logger.info(String.format("[Drops-Follower] flowCtrl=%d, seqGap=%d, inQueue=%d, outQueue=%d, oversized=%d, total=%d",
-                flowControlDrops, seqGapRejects, inQueueDrops, outQueueDrops, oversizedDrops, totalDrops));
-        }
+
+        logger.info(String.format("[Metrics-Follower] window=%dms, ops=%d => thr=%.2f, lat=%.2f us | Memory: %dMB/%dMB (%.1f%%) | drops: fc=%d sg=%d iq=%d oq=%d os=%d",
+            snapshot.timeWindow, snapshot.ops, throughput, avgLatencyUs, usedMemory, maxMemory, memoryUsagePercent,
+            flowControlDrops, seqGapRejects, inQueueDrops, outQueueDrops, oversizedDrops));
 
         MonitorProto.ParamsRequest request = MonitorProto.ParamsRequest.newBuilder()
                 .setReplicaId(replicaId)

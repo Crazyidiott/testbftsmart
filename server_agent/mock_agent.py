@@ -91,14 +91,15 @@ class MockAgentServicer(monitor_pb2_grpc.MetricsServiceServicer):
         print(f"           size={request.size}, tot_thr={request.tot_thr}, tot_lat={request.tot_lat}")
         print(f"           option={option}, arrival_rate={arrival_rate}")
         
-        # Log drop statistics if any
-        total_drops = (getattr(request, 'flow_control_drops', 0) + getattr(request, 'seq_gap_rejects', 0) +
-                       getattr(request, 'in_queue_drops', 0) + getattr(request, 'out_queue_drops', 0) +
-                       getattr(request, 'oversized_drops', 0))
-        if total_drops > 0:
-            print(f"           [Drops] flowCtrl={request.flow_control_drops}, seqGap={request.seq_gap_rejects}, "
-                  f"inQueue={request.in_queue_drops}, outQueue={request.out_queue_drops}, "
-                  f"oversized={request.oversized_drops}")
+        # Log drop statistics
+        flow_control_drops = getattr(request, 'flow_control_drops', 0)
+        seq_gap_rejects = getattr(request, 'seq_gap_rejects', 0)
+        in_queue_drops = getattr(request, 'in_queue_drops', 0)
+        out_queue_drops = getattr(request, 'out_queue_drops', 0)
+        oversized_drops = getattr(request, 'oversized_drops', 0)
+        total_drops = flow_control_drops + seq_gap_rejects + in_queue_drops + out_queue_drops + oversized_drops
+        print(f"           drops: fc={flow_control_drops} sg={seq_gap_rejects} "
+              f"iq={in_queue_drops} oq={out_queue_drops} os={oversized_drops} total={total_drops}")
         
         # 根据模式生成参数
         if self.mode == 'fixed':
