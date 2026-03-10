@@ -91,6 +91,15 @@ class MockAgentServicer(monitor_pb2_grpc.MetricsServiceServicer):
         print(f"           size={request.size}, tot_thr={request.tot_thr}, tot_lat={request.tot_lat}")
         print(f"           option={option}, arrival_rate={arrival_rate}")
         
+        # Log drop statistics if any
+        total_drops = (getattr(request, 'flow_control_drops', 0) + getattr(request, 'seq_gap_rejects', 0) +
+                       getattr(request, 'in_queue_drops', 0) + getattr(request, 'out_queue_drops', 0) +
+                       getattr(request, 'oversized_drops', 0))
+        if total_drops > 0:
+            print(f"           [Drops] flowCtrl={request.flow_control_drops}, seqGap={request.seq_gap_rejects}, "
+                  f"inQueue={request.in_queue_drops}, outQueue={request.out_queue_drops}, "
+                  f"oversized={request.oversized_drops}")
+        
         # 根据模式生成参数
         if self.mode == 'fixed':
             batch_size = self.fixed_batch_size

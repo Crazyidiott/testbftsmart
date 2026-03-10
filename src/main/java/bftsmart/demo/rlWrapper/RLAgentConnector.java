@@ -6,6 +6,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import bftsmart.demo.microbenchmarks.ThroughputLatencyServer;
+import bftsmart.communication.client.netty.NettyTOMMessageDecoder;
+import bftsmart.communication.server.ServerConnection;
 import bftsmart.tom.ServiceProxy;
 import bftsmart.tom.ServiceReplica;
 import bftsmart.tom.core.TOMLayer;
@@ -314,7 +316,6 @@ public class RLAgentConnector {
         double avgLatencyNs = snapshot.latencySamples > 0 ? (double) snapshot.latencySum / snapshot.latencySamples : 0;
         double avgLatencyUs = avgLatencyNs / 1000.0;
         double avgMessageSize = snapshot.sizeSamples > 0 ? (double) snapshot.totalSize / snapshot.sizeSamples : 0;
-        double arrivalRate = (double) snapshot.arrivalCount * 1000.0 / snapshot.timeWindow;
 
         // Memory monitoring
         Runtime runtime = Runtime.getRuntime();
@@ -322,9 +323,35 @@ public class RLAgentConnector {
         long maxMemory = runtime.maxMemory() / (1024 * 1024);
         double memoryUsagePercent = (double) usedMemory / maxMemory * 100;
 
+        // ── Collect drop statistics and true arrival rate from all components ──
+        long flowControlDrops = 0;
+        long seqGapRejects = 0;
+        long trueArrivalCount = 0;
+        long inQueueDrops = ServerConnection.getAndResetInQueueDropCount();
+        long outQueueDrops = ServerConnection.getAndResetOutQueueDropCount();
+        long oversizedDrops = NettyTOMMessageDecoder.getAndResetOversizedDropCount();
+        try {
+            TOMLayer tom = serviceReplica.getReplicaContext()
+                    .getSVController().getTOMLayer();
+            if (tom != null && tom.clientsManager != null) {
+                flowControlDrops = tom.clientsManager.getAndResetFlowControlDropCount();
+                seqGapRejects = tom.clientsManager.getAndResetSeqGapRejectCount();
+                trueArrivalCount = tom.clientsManager.getAndResetArrivalCount();
+            }
+        } catch (Exception e) {
+            logger.debug("Failed to read drop/arrival counters: " + e.getMessage());
+        }
+        double arrivalRate = (double) trueArrivalCount * 1000.0 / snapshot.timeWindow;
+        long totalDrops = flowControlDrops + seqGapRejects + inQueueDrops + outQueueDrops + oversizedDrops;
+
         logger.info(String.format("[Metrics-Leader] window=%dms, ops=%d, latSum=%d, latSamples=%d => thr=%.2f, lat=%.2f us | avgSize=%.0f bytes, arrivalRate=%.2f req/s | Memory: %dMB/%dMB (%.1f%%)",
             snapshot.timeWindow, snapshot.ops, snapshot.latencySum, snapshot.latencySamples,
             throughput, avgLatencyUs, avgMessageSize, arrivalRate, usedMemory, maxMemory, memoryUsagePercent));
+        if (totalDrops > 0) {
+            logger.info(String.format("[Drops] flowCtrl=%d, seqGap=%d, inQueue=%d, outQueue=%d, oversized=%d, total=%d",
+                flowControlDrops, seqGapRejects, inQueueDrops, outQueueDrops, oversizedDrops, totalDrops));
+        }
+        // ─────────────────────────────────────────────────────────────────
 
         // ── DEBUG: Diagnose proposer stall when ops=0 ──────────────────────
         if (snapshot.ops == 0) {
@@ -379,6 +406,11 @@ public class RLAgentConnector {
                 .setTotSize((int) Math.min(cumulativeSizeKB, Integer.MAX_VALUE))
                 .setOption(1)
                 .setArrivalRate(arrivalRate)
+                .setFlowControlDrops(flowControlDrops)
+                .setSeqGapRejects(seqGapRejects)
+                .setInQueueDrops(inQueueDrops)
+                .setOutQueueDrops(outQueueDrops)
+                .setOversizedDrops(oversizedDrops)
                 .build();
 
         return blockingStub.sendMetrics(request);
@@ -405,6 +437,29 @@ public class RLAgentConnector {
 
         logger.info(String.format("[Metrics-Follower] window=%dms, ops=%d => thr=%.2f, lat=%.2f us | Memory: %dMB/%dMB (%.1f%%)",
             snapshot.timeWindow, snapshot.ops, throughput, avgLatencyUs, usedMemory, maxMemory, memoryUsagePercent));
+
+        // Drain drop counters and arrival count on follower side too
+        long flowControlDrops = 0;
+        long seqGapRejects = 0;
+        long inQueueDrops = ServerConnection.getAndResetInQueueDropCount();
+        long outQueueDrops = ServerConnection.getAndResetOutQueueDropCount();
+        long oversizedDrops = NettyTOMMessageDecoder.getAndResetOversizedDropCount();
+        try {
+            TOMLayer tom = serviceReplica.getReplicaContext()
+                    .getSVController().getTOMLayer();
+            if (tom != null && tom.clientsManager != null) {
+                flowControlDrops = tom.clientsManager.getAndResetFlowControlDropCount();
+                seqGapRejects = tom.clientsManager.getAndResetSeqGapRejectCount();
+                tom.clientsManager.getAndResetArrivalCount(); // drain to prevent unbounded growth
+            }
+        } catch (Exception e) {
+            logger.debug("Failed to read drop counters: " + e.getMessage());
+        }
+        long totalDrops = flowControlDrops + seqGapRejects + inQueueDrops + outQueueDrops + oversizedDrops;
+        if (totalDrops > 0) {
+            logger.info(String.format("[Drops-Follower] flowCtrl=%d, seqGap=%d, inQueue=%d, outQueue=%d, oversized=%d, total=%d",
+                flowControlDrops, seqGapRejects, inQueueDrops, outQueueDrops, oversizedDrops, totalDrops));
+        }
 
         MonitorProto.ParamsRequest request = MonitorProto.ParamsRequest.newBuilder()
                 .setReplicaId(replicaId)

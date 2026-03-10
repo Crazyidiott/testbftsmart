@@ -22,6 +22,12 @@ message MetricsRequest {
     int32 tot_size = 6;
     int32 option = 7;
     double arrival_rate = 8;
+    // Drop statistics (per window)
+    int64 flow_control_drops = 9;
+    int64 seq_gap_rejects = 10;
+    int64 in_queue_drops = 11;
+    int64 out_queue_drops = 12;
+    int64 oversized_drops = 13;
 }
 
 message MetricsResponse {

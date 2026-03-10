@@ -1934,6 +1934,18 @@ class MetricsServiceServicer(monitor_pb2_grpc.MetricsServiceServicer):
         payload = request.size
         arrival_rate = request.arrival_rate
         
+        # Collect drop statistics
+        flow_control_drops = getattr(request, 'flow_control_drops', 0)
+        seq_gap_rejects = getattr(request, 'seq_gap_rejects', 0)
+        in_queue_drops = getattr(request, 'in_queue_drops', 0)
+        out_queue_drops = getattr(request, 'out_queue_drops', 0)
+        oversized_drops = getattr(request, 'oversized_drops', 0)
+        total_drops = flow_control_drops + seq_gap_rejects + in_queue_drops + out_queue_drops + oversized_drops
+        if total_drops > 0:
+            print(f"[Drops] flowCtrl={flow_control_drops}, seqGap={seq_gap_rejects}, "
+                  f"inQueue={in_queue_drops}, outQueue={out_queue_drops}, "
+                  f"oversized={oversized_drops}, total={total_drops}")
+        
         # 计算当前 reward (使用归一化值)
         if throughput > 0:
             norm_thr = throughput / THROUGHPUT_SCALE

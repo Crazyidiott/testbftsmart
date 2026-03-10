@@ -19,6 +19,7 @@ import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.slf4j.Logger;
@@ -37,6 +38,9 @@ import io.netty.handler.codec.ByteToMessageDecoder;
 public class NettyTOMMessageDecoder extends ByteToMessageDecoder {
     
     private Logger logger = LoggerFactory.getLogger(this.getClass());
+
+    // Drop counter for oversized messages (shared across all decoder instances)
+    private static final AtomicLong oversizedDropCount = new AtomicLong(0);
 
 
     /**
@@ -103,6 +107,7 @@ public class NettyTOMMessageDecoder extends ByteToMessageDecoder {
 
             // Skip the request if it is too large
             if (dataLength > controller.getStaticConf().getMaxRequestSize() && !isClient) {
+                oversizedDropCount.incrementAndGet();
                 logger.warn("Discarding request with " + dataLength + " bytes");
                 buffer.skipBytes(Integer.BYTES);
                 int readableBytes = buffer.readableBytes();
@@ -180,5 +185,11 @@ public class NettyTOMMessageDecoder extends ByteToMessageDecoder {
         }
         return;
     }
+
+    /** Get cumulative oversized message drop count */
+    public static long getOversizedDropCount() { return oversizedDropCount.get(); }
+
+    /** Get and reset oversized message drop count (for windowed metrics) */
+    public static long getAndResetOversizedDropCount() { return oversizedDropCount.getAndSet(0); }
 
 }

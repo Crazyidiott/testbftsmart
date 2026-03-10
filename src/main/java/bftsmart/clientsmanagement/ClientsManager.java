@@ -64,6 +64,9 @@ public class ClientsManager {
     private AtomicLong flowControlDropCount = new AtomicLong(0);
     private AtomicLong seqGapRejectCount = new AtomicLong(0);
 
+    // True request arrival counter (incremented before any drop/reject checks)
+    private AtomicLong arrivalCount = new AtomicLong(0);
+
     public ClientsManager(ServerViewController controller, RequestsTimer timer, RequestVerifier verifier, ServerCommunicationSystem cs) {
         this.controller = controller;
         this.timer = timer;
@@ -304,6 +307,9 @@ public class ClientsManager {
      * accounted
      */
     public boolean requestReceived(TOMMessage request, boolean fromClient, ServerCommunicationSystem cs) {
+
+        // Count every request arrival before any filtering/dropping
+        arrivalCount.incrementAndGet();
 
         long receptionTime = System.nanoTime();
         long receptionTimestamp = System.currentTimeMillis();
@@ -695,5 +701,13 @@ public class ClientsManager {
     public long getFlowControlDropCount() { return flowControlDropCount.get(); }
     /** [DIAG] Get total sequence gap rejections */
     public long getSeqGapRejectCount() { return seqGapRejectCount.get(); }
+
+    /** Get and reset flow control drop count (for windowed metrics) */
+    public long getAndResetFlowControlDropCount() { return flowControlDropCount.getAndSet(0); }
+    /** Get and reset sequence gap reject count (for windowed metrics) */
+    public long getAndResetSeqGapRejectCount() { return seqGapRejectCount.getAndSet(0); }
+
+    /** Get and reset true arrival count (for windowed metrics) */
+    public long getAndResetArrivalCount() { return arrivalCount.getAndSet(0); }
 
 }

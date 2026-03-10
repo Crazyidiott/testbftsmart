@@ -35,6 +35,7 @@ import java.security.cert.CertificateException;
 import java.security.spec.InvalidKeySpecException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -48,6 +49,11 @@ public class ServerConnection {
 	private final Logger logger = LoggerFactory.getLogger(this.getClass());
 
 	private static final long POOL_TIME = 5000;
+
+	// Drop counters shared across all ServerConnection instances
+	private static final AtomicLong outQueueDropCount = new AtomicLong(0);
+	private static final AtomicLong inQueueDropCount = new AtomicLong(0);
+
 	private final ServerViewController
 			controller;
 	private SSLSocket socket;
@@ -160,6 +166,7 @@ public class ServerConnection {
 		if (useSenderThread) {
 			// only enqueue messages if there queue is not full
 			if (!outQueue.offer(data)) {
+				outQueueDropCount.incrementAndGet();
 				logger.debug("Out queue for " + remoteId + " full (message discarded).");
 			}
 		} else {
@@ -393,6 +400,7 @@ public class ServerConnection {
 
 						if (sm.getSender() == remoteId) {
 							if (!inQueue.offer(sm)) {
+								inQueueDropCount.incrementAndGet();
 								logger.warn("Inqueue full (message from " + remoteId + " discarded).");
 							}/* else {
 								logger.trace("Message: {} queued, remoteId: {}", sm.toString(), sm.getSender());
@@ -551,4 +559,16 @@ public class ServerConnection {
 		}
 
 	}
+
+	/** Get cumulative outQueue drop count across all connections */
+	public static long getOutQueueDropCount() { return outQueueDropCount.get(); }
+
+	/** Get cumulative inQueue drop count across all connections */
+	public static long getInQueueDropCount() { return inQueueDropCount.get(); }
+
+	/** Get and reset outQueue drop count (for windowed metrics) */
+	public static long getAndResetOutQueueDropCount() { return outQueueDropCount.getAndSet(0); }
+
+	/** Get and reset inQueue drop count (for windowed metrics) */
+	public static long getAndResetInQueueDropCount() { return inQueueDropCount.getAndSet(0); }
 }
