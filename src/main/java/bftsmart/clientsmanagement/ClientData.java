@@ -18,14 +18,14 @@ package bftsmart.clientsmanagement;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.SignatureException;
-import java.util.Iterator;
+import java.util.TreeSet;
 import java.util.concurrent.locks.ReentrantLock;
-
-import bftsmart.tom.core.messages.TOMMessage;
-import bftsmart.tom.util.TOMUtil;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import bftsmart.tom.core.messages.TOMMessage;
+import bftsmart.tom.util.TOMUtil;
 
 public class ClientData {
 
@@ -49,6 +49,9 @@ public class ClientData {
     //anb: new code to deal with client requests that arrive after their execution
     private RequestList orderedRequests = new RequestList(MAX_SIZE_ORDERED_REQUESTS);
     private RequestList replyStore = new RequestList(MAX_SIZE_ORDERED_REQUESTS);
+
+    // Track sequence numbers dropped by flow control so forwarded retries can bypass the replay check
+    private final TreeSet<Integer> flowControlDroppedSeqs = new TreeSet<>();
 
     private Signature signatureVerificator = null;
     
@@ -175,6 +178,18 @@ public class ClientData {
 
     public RequestList getReplyStore() {
         return this.replyStore;
+    }
+
+    public void addFlowControlDrop(int seq) {
+        flowControlDroppedSeqs.add(seq);
+    }
+
+    public boolean removeFlowControlDrop(int seq) {
+        return flowControlDroppedSeqs.remove(seq);
+    }
+
+    public void clearFlowControlDrops() {
+        flowControlDroppedSeqs.clear();
     }
 
 }

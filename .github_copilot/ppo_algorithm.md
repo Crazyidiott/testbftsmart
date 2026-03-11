@@ -1,7 +1,7 @@
 # PPO 调参算法说明文档（已更新）
 
 > 文件对应实现：`server_agent/trainer.py`，类 `PPO`
-> 最后更新：含 9 项 PPO 缺陷修复（#1-#8, #10）+ EMA tot_thr 修复
+> 最后更新：含 12 项 PPO 缺陷修复（#1-#8, #10-#13）+ 9D 状态向量（含 drop 统计 & 共识延迟）
 
 ---
 
@@ -23,33 +23,52 @@ Java (RLAgentConnector)          Python (trainer.py / PPO)
 
 ## 2. 输入：状态向量
 
-每次 `modelUpdate` 收到一个 7 维的原始状态，经 `Normalized()` 归一化后输入网络：
+每次 `modelUpdate` 收到一个 **9 维**的原始状态，经 `Normalized()` 归一化后输入网络：
 
-| 索引 | 字段           | Java 来源                      | 物理含义                                      | 归一化上限     |
-|------|----------------|-------------------------------|-----------------------------------------------|----------------|
-| 0    | `throughput`   | 当前窗口 ops/s（瞬时）          | 当前秒内系统吞吐量                             | 60,000         |
-| 1    | `latency`      | 当前窗口平均延迟（µs，瞬时）    | 当前秒内平均请求延迟                           | 30,000         |
-| 2    | `size`         | 当前窗口平均消息大小（bytes）   | 当前秒内平均单条消息大小                       | 10,000         |
-| 3    | `tot_thr`      | EMA 平滑吞吐量（α=0.2）        | ~5s 平滑后的吞吐量趋势，与 index 0 互补        | 60,000         |
-| 4    | `tot_lat`      | EMA 平滑延迟（α=0.2）          | ~5s 平滑后的延迟趋势，与 index 1 互补          | 30,000         |
-| 5    | `tot_size`     | 累计消息字节数（KB，累加）      | 实验以来总数据量，趋势性背景信号               | 1×10⁹          |
-| 6    | `arrival_rate` | 当前窗口请求到达率（req/s）     | 客户端负载强度                                 | 60,000         |
+| 索引 | 字段                | Java 来源                               | 物理含义                                                    | 归一化上限 |
+|------|---------------------|-----------------------------------------|-------------------------------------------------------------|------------|
+| 0    | `throughput`        | 当前窗口 ops/s（瞬时）                   | 当前秒内系统吞吐量                                           | 60,000     |
+| 1    | `latency`           | 当前窗口平均延迟（µs，瞬时）             | 当前秒内平均请求端到端延迟（含 batch 等待 + 共识 + 执行）     | 30,000     |
+| 2    | `size`              | 当前窗口平均消息大小（bytes）            | 当前秒内平均单条消息大小                                     | 10,000     |
+| 3    | `tot_thr`           | EMA 平滑吞吐量（α=0.2）                 | ~5s 平滑后的吞吐量趋势，与 index 0 互补                      | 60,000     |
+| 4    | `tot_lat`           | EMA 平滑延迟（α=0.2）                   | ~5s 平滑后的延迟趋势，与 index 1 互补                        | 30,000     |
+| 5    | `tot_size`          | EMA 平滑消息大小（α=0.2）               | ~5s 平滑后的消息大小趋势，与 index 2 互补                    | 10,000     |
+| 6    | `arrival_rate`      | 当前窗口请求到达率（req/s）              | 客户端负载强度（在 `ClientsManager.requestReceived()` 入口计数）| 60,000     |
+| 7    | `total_drops`       | 5 类丢弃计数器之和（当前窗口）           | 系统过载/异常信号（详见 §2.1）                                | 60,000     |
+| 8    | `consensus_latency` | 共识轮延迟（µs，当前窗口平均）           | 纯共识延迟 = `decisionTime - consensusStartTime`，直接反映网络 RTT | 30,000     |
 
 归一化公式：`s_norm[i] = s[i] / (max_vals[i] + 1e-8)`
 
-### EMA 设计说明
+### 2.1 Drop 统计来源
 
-`tot_thr`（index 3）和 `tot_lat`（index 4）都使用指数移动平均（α=0.2），在 Java 侧计算：
+`total_drops`（index 7）是 5 个独立丢弃计数器在当前 1s 窗口内的总和：
+
+| 丢弃类型              | 计数器位置                    | 触发条件                           |
+|-----------------------|------------------------------|------------------------------------|
+| `flow_control_drops`  | `ClientsManager`             | 客户端 pending 请求超过限制         |
+| `seq_gap_rejects`     | `ClientsManager`             | 请求序列号跳跃过大                  |
+| `in_queue_drops`      | `ServerConnection`           | 入站队列满，offer 失败              |
+| `out_queue_drops`     | `ServerConnection`           | 出站队列满，offer 失败              |
+| `oversized_drops`     | `NettyTOMMessageDecoder`     | 消息大小超过 `maxRequestSize`       |
+
+### 2.2 共识延迟 vs 端到端延迟
+
+- **index 1 (`latency`)**：`executedTime - receptionTime`，包含 batch 等待、共识协议、排队执行的全部时间。在高 `batchTimeout` 或高负载下，batch 等待占主导，掩盖网络延迟信号。
+- **index 8 (`consensus_latency`)**：`decisionTime - consensusStartTime`，仅测量 PBFT 共识轮的耗时。这是网络往返时延（RTT）的直接代理指标，不受 batch 参数影响。
+
+### 2.3 EMA 设计说明
+
+`tot_thr`（index 3）、`tot_lat`（index 4）和 `tot_size`（index 5）都使用指数移动平均（α=0.2），在 Java 侧（`RLAgentConnector`）计算：
 
 ```
 smoothed(t) = 0.8 × smoothed(t-1) + 0.2 × raw(t)
 ```
 
 - **有效时间窗口**：约 5s（1/0.2 = 5 个采样周期）
-- **作用**：过滤瞬时噪声，向网络提供趋势信号，区别于 index 0/1 的瞬时值
-- **对称性**：吞吐量和延迟使用相同的 α，两者量纲不同但归一化后范围一致
+- **作用**：过滤瞬时噪声，向网络提供趋势信号，区别于 index 0/1/2 的瞬时值
+- **对称性**：三者使用相同的 α，量纲不同但归一化后范围一致
 
-> `tot_thr` 之前使用的是累计 ops 数（单调递增，除以 1e9），这等价于只编码了实验时长，而非吞吐质量。改为 EMA 后信号有效性与 `tot_lat` 对齐。
+> `tot_thr` 和 `tot_size` 之前分别使用累计 ops 数和累计 KB 数（单调递增），这等价于只编码了实验时长，而非当前质量。改为 EMA 后信号有效性与 `tot_lat` 对齐。
 
 ---
 
@@ -81,17 +100,20 @@ arrival         = max(old_state[6], 1.0)
 completion_rate = min(old_state[0] / arrival, 1.0)
 norm_lat        = old_state[1] / LATENCY_SCALE
 backlog_penalty = max(0.0, (arrival - old_state[0]) / THROUGHPUT_SCALE)
-reward = completion_rate - norm_lat - backlog_penalty
+drop_ratio      = old_state[7] / arrival
+reward = completion_rate - norm_lat - backlog_penalty - drop_penalty_weight * drop_ratio
 ```
 
-三个分量的含义：
+四个分量的含义：
 
 | 分量              | 范围       | 含义                                                              |
 |-------------------|------------|-------------------------------------------------------------------|
 | `completion_rate` | [0, 1]     | 服务完成率（throughput / arrival_rate），感知负载强度              |
 | `norm_lat`        | [0, ~1]    | 归一化延迟，越低越好                                               |
 | `backlog_penalty` | [0, ~1]    | 队列积压惩罚，仅在 arrival > throughput 时非零，惩罚过载状态       |
+| `drop_penalty`    | [0, ~0.5]  | `drop_penalty_weight × (total_drops / arrival)`，惩罚消息丢弃率   |
 
+- **`drop_penalty_weight = 0.5`**：控制丢弃惩罚的强度。当全部请求被丢弃时（drop_ratio=1），惩罚为 0.5，与 completion_rate=0 叠加后 reward 深度为负。
 - **旧公式 `norm_thr − norm_lat` 的缺陷**：在高负载时，吞吐因系统满载自然升高，旧公式会给出虚假高分。新公式用完成率代替绝对吞吐，reward 反映参数质量，而非负载强度。
 - **注意**：reward 使用 `old_state`（上一轮的观测），对应上一轮动作的实际效果（避免未来信息泄露）。
 
@@ -111,27 +133,27 @@ reward = completion_rate - norm_lat - backlog_penalty
 ### 5.2 Batch 子网络（1s 频率）
 
 ```
-输入 s (7维，归一化)
+输入 s (9维，归一化)
     │
-fc1: Linear(7 → 64) + ReLU
+fc1: Linear(9 → 64) + ReLU
     ├─▶ fc_pi_a: Linear(64 → 10)  →  Softmax  →  P(batchSize)
     ├─▶ fc_pi_b: Linear(64 →  6)  →  Softmax  →  P(batchTimeout)
     ├─▶ fc_pi_c: Linear(64 →  8)  →  Softmax  →  P(C)  [当前未使用]
     └─▶ fc_v   : Linear(64 →  1)             →  V(s)   [Batch Critic]
 
-参数量：2137   优化器：optimizer（Adam, lr=3×10⁻⁴）
+参数量：2265   优化器：optimizer（Adam, lr=3×10⁻⁴）
 ```
 
 ### 5.3 Timeout 子网络（10s 频率）
 
 ```
-输入 s (7维，归一化)
+输入 s (9维，归一化)
     │
-fc1_timeout: Linear(7 → 32) + ReLU
+fc1_timeout: Linear(9 → 32) + ReLU
     ├─▶ fc_pi_d     : Linear(32 → 10)  →  Softmax  →  P(requestTimeout)
     └─▶ fc_v_timeout: Linear(32 →  1)             →  V_t(s)  [Timeout Critic]
 
-参数量：619   优化器：optimizer_timeout（Adam, lr=3×10⁻⁴）
+参数量：683   优化器：optimizer_timeout（Adam, lr=3×10⁻⁴）
 ```
 
 **关键保证**：`optimizer` 的 `param_groups` 与 `optimizer_timeout` 的 `param_groups` 参数集合完全不相交（已通过运行时断言验证）。
@@ -151,6 +173,7 @@ fc1_timeout: Linear(7 → 32) + ReLU
 | `entropy_coef`                      | 0.01    | 熵正则化系数，防止策略过早收敛为确定性策略           |
 | `THROUGHPUT_SCALE`                  | 60,000  | 吞吐量归一化上限（ops/s）                           |
 | `LATENCY_SCALE`                     | 30,000  | 延迟归一化上限（µs = 30ms）                         |
+| `drop_penalty_weight`               | 0.5     | reward 中丢弃率惩罚的权重系数                       |
 | `REQUEST_TIMEOUT_UPDATE_INTERVAL`   | 10      | timeout 决策间隔（对应 10s）                        |
 | `TIMEOUT_MIN_TRAIN_SIZE`            | 5       | Timeout 网络训练所需最少经验条数                    |
 | `TIMEOUT_BUFFER_MAXSIZE`            | 20      | Timeout 滚动经验缓冲区最大条数                      |
@@ -172,7 +195,9 @@ fc1_timeout: Linear(7 → 32) + ReLU
 │      arrival         = max(old_state[6], 1.0)
 │      completion_rate = min(old_state[0] / arrival, 1.0)
 │      backlog_penalty = max(0, (arrival - old_state[0]) / THROUGHPUT_SCALE)
+│      drop_ratio      = old_state[7] / arrival
 │      reward = completion_rate - norm_lat - backlog_penalty
+│              - drop_penalty_weight * drop_ratio
 │
 ├─ 2. 向 batch 经验缓冲区写入 transition（10 字段）
 │      (s_norm, a_idx, b_idx, c_idx, reward, s'_norm, p_a, p_b, p_c, opt)
@@ -353,6 +378,9 @@ def _enforce_timeout_constraint(self, request_timeout, batch_timeout):
 | #7 | Advantage 未归一化，梯度量级不稳定 | 加入 `(A - mean) / (std + ε)` |
 | #8 | Timeout 缓冲区每次训练后清空，每轮仅单条经验 | 改为滚动缓冲区（min=5 条才训练，max=20 条保留）|
 | #10 | reward 不感知 arrival_rate，高负载时给出虚假高分 | 改用完成率 + 队列积压惩罚 |
+| #11 | `tot_size` 为累计 KB（单调递增），不是平稳信号 | 改为 EMA 平滑（α=0.2，与 tot_thr/tot_lat 对齐），归一化上限从 1×10⁹ 改为 10,000 |
+| #12 | 丢弃事件对 RL 决策不可见，策略无法规避过载丢包 | 5 类 drop 计数器汇总为 `total_drops` 加入 state[7]，并在 reward 中加入 `drop_penalty_weight × drop_ratio` |
+| #13 | 状态中无直接网络延迟信号，latency 含 batch 等待噪声 | 新增 `consensus_latency`（共识轮延迟）作为 state[8]，直接反映 RTT |
 
 ---
 
@@ -360,5 +388,7 @@ def _enforce_timeout_constraint(self, request_timeout, batch_timeout):
 
 | 问题 | 影响 | 优先级 |
 |------|------|--------|
+| 训练仅在固定延迟环境下进行，策略无法泛化到其他延迟条件 | 部署环境与训练环境偏离时策略失效 | 高 |
 | batchSize 和 batchTimeout 独立学习，无法建模耦合（大 BS + 极短 BT 是无效组合） | 可能选出次优参数组合 | 低（架构改动大） |
 | reward 无 P99 延迟软约束 | 长尾延迟不受控 | 中 |
+| `consensus_latency` 尚未加入 DataLogger CSV 持久化 | 该维度的历史数据无法离线分析 | 低 |

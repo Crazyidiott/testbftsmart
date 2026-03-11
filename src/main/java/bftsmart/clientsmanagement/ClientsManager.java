@@ -330,7 +330,26 @@ public class ClientsManager {
         //Is this a leader replay attack?
         if (!fromClient && clientData.getSession() == request.getSession() &&
                 clientData.getLastMessageDelivered() >= request.getSequence()) {
-            
+
+            // Check: was this request dropped by flow control rather than truly ordered?
+            // If so, re-admit it into pending to prevent a needless view change.
+            if (clientData.removeFlowControlDrop(request.getSequence())) {
+                if (clientData.getPendingRequests().getBySequence(request.getSequence()) == null) {
+                    request.recvFromClient = false;
+                    request.receptionTime = System.nanoTime();
+                    request.receptionTimestamp = System.currentTimeMillis();
+                    clientData.getPendingRequests().add(request);
+                    clientData.setLastMessageReceivedTime(request.receptionTime);
+                    if (timer != null) {
+                        timer.watch(request);
+                    }
+                    logger.info("[FLOW-CTRL-READMIT] Re-admitted forwarded seq={} client={} into pending",
+                            request.getSequence(), request.getSender());
+                }
+                clientData.clientLock.unlock();
+                return true;
+            }
+
             clientData.clientLock.unlock();
             logger.warn("Detected a leader replay attack, rejecting request");
             return false;
@@ -363,7 +382,7 @@ public class ClientsManager {
                 //but that scenario is far less damaging than the permanent client death caused by sequence gaps under normal load.
                 clientData.setLastMessageReceived(request.getSequence());
                 clientData.setLastMessageReceivedTime(request.receptionTime);
-
+                clientData.addFlowControlDrop(request.getSequence());
 
                 clientData.clientLock.unlock();
                 String source = fromClient ? "client" : "forwarded";
@@ -385,6 +404,7 @@ public class ClientsManager {
             clientData.setLastMessageReceived(-1);
             clientData.setLastMessageDelivered(-1);
             clientData.getOrderedRequests().clear();
+            clientData.clearFlowControlDrops();
             clearPendingRequests(clientData);
         }
 
