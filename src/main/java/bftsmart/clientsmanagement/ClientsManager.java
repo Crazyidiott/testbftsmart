@@ -308,8 +308,10 @@ public class ClientsManager {
      */
     public boolean requestReceived(TOMMessage request, boolean fromClient, ServerCommunicationSystem cs) {
 
-        // Count every request arrival before any filtering/dropping
-        arrivalCount.incrementAndGet();
+        // Count only direct client arrivals, not PROPOSE re-processing by leader
+        if (fromClient) {
+            arrivalCount.incrementAndGet();
+        }
 
         long receptionTime = System.nanoTime();
         long receptionTimestamp = System.currentTimeMillis();

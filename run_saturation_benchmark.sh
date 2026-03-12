@@ -124,9 +124,11 @@ create_single_workload_config() {
     local duration=$1
     local rate=$2
     local request_size=$3
+    local num_threads=10
+    local rate_per_thread=$((rate / num_threads))
 
     echo "# Duration(s), Rate(ops/sec per thread), RequestSize(bytes)" > "$TEMP_WORKLOAD_CONFIG"
-    echo "${duration}, ${rate}, ${request_size}" >> "$TEMP_WORKLOAD_CONFIG"
+    echo "${duration}, ${rate_per_thread}, ${request_size}" >> "$TEMP_WORKLOAD_CONFIG"
 }
 
 # 解析 server log 提取 metrics
