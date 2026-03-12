@@ -47,7 +47,7 @@ BATCH_CONFIGS=(
 MESSAGE_SIZES=(512 1024)
 
 # 逐步递增的目标发送速率 (ops/s，必须升序排列)
-RATES=(1000 2000 3000 5000 7000 10000 15000 20000 30000)
+RATES=(10000 15000 20000 25000 30000 35000 40000 45000 50000)
 
 # 饱和检测阈值：当 throughput / target_rate < 此值时认为已饱和
 SATURATION_THRESHOLD=0.85
@@ -55,7 +55,10 @@ SATURATION_THRESHOLD=0.85
 # 连续多少次达到饱和后提前终止该配置的测试 (0 = 不提前终止，跑完所有速率)
 EARLY_STOP_COUNT=2
 
-# 每个配置的运行时间 (秒)
+# 预热时间 (秒) - 让客户端连接建立并达到目标速率
+WARMUP_DURATION=15
+
+# 每个配置的测量时间 (秒)
 RUN_DURATION=30
 
 # 是否跳过编译
@@ -121,13 +124,17 @@ is_config_saturated() {
 
 # 创建单一 workload 的临时配置文件
 create_single_workload_config() {
-    local duration=$1
-    local rate=$2
-    local request_size=$3
+    local warmup=$1
+    local duration=$2
+    local rate=$3
+    local request_size=$4
     local num_threads=10
     local rate_per_thread=$((rate / num_threads))
 
     echo "# Duration(s), Rate(ops/sec per thread), RequestSize(bytes)" > "$TEMP_WORKLOAD_CONFIG"
+    echo "# Phase 1: warmup" >> "$TEMP_WORKLOAD_CONFIG"
+    echo "${warmup}, ${rate_per_thread}, ${request_size}" >> "$TEMP_WORKLOAD_CONFIG"
+    echo "# Phase 2: measurement" >> "$TEMP_WORKLOAD_CONFIG"
     echo "${duration}, ${rate_per_thread}, ${request_size}" >> "$TEMP_WORKLOAD_CONFIG"
 }
 
@@ -143,7 +150,7 @@ import sys
 log_file = "$log_file"
 output_file = "$output_file"
 
-pattern = r'thr=([0-9.]+), lat=([0-9.]+) us \| avgSize=([0-9.]+) bytes, arrivalRate=([0-9.]+) req/s \| Memory: ([0-9]+)MB/([0-9]+)MB \(([0-9.]+)%\)'
+pattern = r'thr=([0-9.]+), lat=([0-9.]+) us(?:, consLat=[0-9.]+ us)? \| avgSize=([0-9.]+) bytes, arrivalRate=([0-9.]+) req/s \| Memory: ([0-9]+)MB/([0-9]+)MB \(([0-9.]+)%\)'
 
 throughputs = []
 latencies = []
@@ -181,8 +188,9 @@ if n > 0:
         mem_percent.pop()
 
     n = len(throughputs)
-    # 跳过前5个预热样本
-    skip = min(5, n // 3)
+    # 跳过预热阶段的样本 (WARMUP_DURATION秒 + 5个额外缓冲)
+    warmup_duration = int("${WARMUP_DURATION}")
+    skip = min(warmup_duration + 5, n // 2)
     throughputs = throughputs[skip:]
     latencies = latencies[skip:]
     avg_sizes = avg_sizes[skip:]
@@ -225,6 +233,7 @@ echo "Skip Build: ${SKIP_BUILD}"
 echo "Resume Mode: ${RESUME_MODE}"
 echo "Saturation Threshold: ${SATURATION_THRESHOLD}"
 echo "Early Stop Count: ${EARLY_STOP_COUNT} (0=disabled)"
+echo "Warmup Duration: ${WARMUP_DURATION}s"
 echo ""
 
 # 创建结果目录
@@ -259,7 +268,7 @@ echo "    Message sizes: ${MESSAGE_SIZES[*]} bytes"
 echo "    Rate sweep: ${RATES[*]} ops/s"
 echo "    Max experiments: ${TOTAL_EXPERIMENTS}"
 echo "      (${TOTAL_CONFIGS} configs × ${TOTAL_SIZES} sizes × ${TOTAL_RATES} rates)"
-echo "    Run duration: ${RUN_DURATION}s per experiment"
+echo "    Warmup: ${WARMUP_DURATION}s + Measurement: ${RUN_DURATION}s per experiment"
 echo ""
 
 read -p "Press Enter to start, or Ctrl+C to abort..."
@@ -323,8 +332,8 @@ for msg_size in "${MESSAGE_SIZES[@]}"; do
             echo "      Config: bs=${bs}, bt=${bt}, msg_size=${msg_size}"
             echo "      Target rate: ${rate} ops/s"
 
-            # 创建临时 workload 配置
-            create_single_workload_config "$RUN_DURATION" "$rate" "$msg_size"
+            # 创建临时 workload 配置（预热 + 测量两阶段）
+            create_single_workload_config "$WARMUP_DURATION" "$RUN_DURATION" "$rate" "$msg_size"
 
             # 日志文件命名
             LOG_PREFIX="${CONFIG_KEY}_r${rate}"
