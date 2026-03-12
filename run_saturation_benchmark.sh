@@ -47,7 +47,7 @@ BATCH_CONFIGS=(
 MESSAGE_SIZES=(512 1024)
 
 # 逐步递增的目标发送速率 (ops/s，必须升序排列)
-RATES=(10000 15000 20000 25000 30000 35000 40000 45000 50000)
+RATES=(15000 20000 25000 30000 35000 40000 45000 50000)
 
 # 饱和检测阈值：当 throughput / target_rate < 此值时认为已饱和
 SATURATION_THRESHOLD=0.85
@@ -359,8 +359,9 @@ for msg_size in "${MESSAGE_SIZES[@]}"; do
                 METRICS=$(cat "$METRICS_TMP")
                 echo "${bs},${bt},${msg_size},${rate},${METRICS}" >> "$RESULTS_CSV"
 
-                # 提取 avg_throughput 用于饱和检测
+                # 提取 avg_throughput 和 avg_arrival_rate 用于饱和检测
                 AVG_THR=$(echo "$METRICS" | cut -d',' -f1)
+                AVG_ARRIVAL=$(echo "$METRICS" | cut -d',' -f4)
                 # 计算饱和比率
                 SAT_RATIO=$(python3 -c "
 thr = float('${AVG_THR}')
@@ -368,14 +369,38 @@ rate = float('${rate}')
 ratio = thr / rate if rate > 0 else 0
 print(f'{ratio:.4f}')
 ")
+                # 检测客户端是否达到了目标速率 (arrival_rate vs target_rate)
+                CLIENT_RATIO=$(python3 -c "
+arrival = float('${AVG_ARRIVAL}')
+rate = float('${rate}')
+ratio = arrival / rate if rate > 0 else 0
+print(f'{ratio:.4f}')
+")
                 echo "      Saturation ratio: ${SAT_RATIO} (threshold: ${SATURATION_THRESHOLD})"
+                echo "      Client delivery ratio: ${CLIENT_RATIO} (arrival_rate/target_rate)"
 
-                # 检测是否饱和
-                IS_SATURATED=$(python3 -c "print('yes' if float('${SAT_RATIO}') < float('${SATURATION_THRESHOLD}') else 'no')")
+                # 检测是否饱和：需要区分真饱和 vs 客户端瓶颈
+                IS_SATURATED=$(python3 -c "
+sat_ratio = float('${SAT_RATIO}')
+client_ratio = float('${CLIENT_RATIO}')
+threshold = float('${SATURATION_THRESHOLD}')
+if sat_ratio < threshold:
+    if client_ratio < threshold:
+        # 客户端自身也达不到目标速率，不算真饱和
+        print('client_bottleneck')
+    else:
+        # 客户端发够了但服务端跟不上，真饱和
+        print('yes')
+else:
+    print('no')
+")
 
                 if [[ "$IS_SATURATED" == "yes" ]]; then
                     CONSECUTIVE_SATURATED=$((CONSECUTIVE_SATURATED + 1))
                     echo "      >>> SATURATED (${CONSECUTIVE_SATURATED}/${EARLY_STOP_COUNT})"
+                elif [[ "$IS_SATURATED" == "client_bottleneck" ]]; then
+                    CONSECUTIVE_SATURATED=$((CONSECUTIVE_SATURATED + 1))
+                    echo "      >>> CLIENT BOTTLENECK - client can't reach target rate (${CONSECUTIVE_SATURATED}/${EARLY_STOP_COUNT})"
                 else
                     CONSECUTIVE_SATURATED=0
                 fi

@@ -349,7 +349,9 @@ public class AsyncDynamicClient {
                 
                 while (System.nanoTime() < phaseEndTime) {
                     // Rate Limiting specific to this phase
-                    performRateLimiting(phaseOpsCount, phaseStartTime, currentRate);
+                    long[] result = performRateLimiting(phaseOpsCount, phaseStartTime, currentRate);
+                    phaseStartTime = result[0];
+                    phaseOpsCount = result[1];
                     
                     // Send
                     sendRequest();
@@ -362,15 +364,19 @@ public class AsyncDynamicClient {
         private void runStatic() throws InterruptedException {
             Storage st = new Storage(this.numberOfOps / 2);
             long startExperimentTime = System.nanoTime();
+            long opsCount = 0;
 
             for (int i = 0; i < this.numberOfOps; i++) {
                 
                 // --- Rate Limiting Logic (Legacy) ---
-                performRateLimiting(i, startExperimentTime, this.targetRate);
+                long[] result = performRateLimiting(opsCount, startExperimentTime, this.targetRate);
+                startExperimentTime = result[0];
+                opsCount = result[1];
                 // ---------------------------
 
                 long last_send_instant = System.nanoTime();
                 sendRequest();
+                opsCount++;
 
                 if (i > (this.numberOfOps / 2)) st.store(System.nanoTime() - last_send_instant);
 
@@ -393,11 +399,15 @@ public class AsyncDynamicClient {
             }
         }
         
-        private void performRateLimiting(long opsCount, long startTime, double rate) {
+        /**
+         * @return [adjustedStartTime, adjustedOpsCount] - baseline may be reset if too far behind
+         */
+        private long[] performRateLimiting(long opsCount, long startTime, double rate) {
             if (rate > 0) {
-                double expectedTimeSinceStartSec = (opsCount) / rate; // How many seconds should have passed for i ops
+                double expectedTimeSinceStartSec = (opsCount) / rate;
                 long expectedTimeSinceStartNano = (long) (expectedTimeSinceStartSec * 1_000_000_000L);
-                long actualTimeSinceStartNano = System.nanoTime() - startTime;
+                long now = System.nanoTime();
+                long actualTimeSinceStartNano = now - startTime;
                 
                 long sleepNano = expectedTimeSinceStartNano - actualTimeSinceStartNano;
                 
@@ -409,8 +419,14 @@ public class AsyncDynamicClient {
                     } catch (InterruptedException e) {
                         // Ignore
                     }
+                } else if (-sleepNano > 1_000_000_000L) {
+                    // More than 1 second behind schedule - reset baseline instead of
+                    // trying to catch up, which would cause uncontrolled bursting
+                    startTime = now - (long)(1.0 / rate * 1_000_000_000L);
+                    opsCount = 1;
                 }
             }
+            return new long[]{startTime, opsCount};
         }
         
         private void sendRequest() {
