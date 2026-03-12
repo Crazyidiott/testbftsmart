@@ -468,7 +468,35 @@ public class ClientsManager {
             //I will not put this message on the pending requests list
             if (clientData.getLastMessageReceived() >= request.getSequence()) {
                 //I already have/had this message
-                
+
+                // Check: if this is a forwarded request for a sequence that was
+                // flow-control-dropped (never ordered), re-admit it into pending
+                // immediately. This path handles the case where lastMessageDelivered
+                // has NOT yet advanced past the dropped sequence (the existing
+                // re-admit check near the top of this method only fires when
+                // lastMessageDelivered >= seq, which requires later requests to
+                // have been delivered first).
+                if (!fromClient) {
+                    long[] originalTimes = clientData.removeFlowControlDrop(request.getSequence());
+                    if (originalTimes != null) {
+                        if (clientData.getPendingRequests().getBySequence(request.getSequence()) == null) {
+                            request.recvFromClient = false;
+                            request.receptionTime = originalTimes[0];
+                            request.receptionTimestamp = originalTimes[1];
+                            clientData.getPendingRequests().add(request);
+                            clientData.setLastMessageReceivedTime(request.receptionTime);
+                            if (timer != null) {
+                                timer.watch(request);
+                            }
+                            logger.info("[FLOW-CTRL-READMIT] Re-admitted forwarded seq={} client={} into pending via direct path (drop wait={}ms)",
+                                    request.getSequence(), request.getSender(),
+                                    System.currentTimeMillis() - originalTimes[1]);
+                        }
+                        clientData.clientLock.unlock();
+                        return true;
+                    }
+                }
+
                 //send reply if it is available
                 TOMMessage reply = clientData.getReply(request.getSequence());
                 

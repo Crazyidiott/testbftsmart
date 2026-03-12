@@ -272,6 +272,50 @@
 
 > 实验结束后自动恢复网络（移除人工延迟）并恢复原始 `requestTimeout`。
 
+### `run_asymmetric_timeout_benchmark.sh` — 非对称延迟 × RequestTimeout 测试
+
+**目的：** 只对 leader（Node 0）注入高延迟，其他 replica（Node 1/2/3）保持低延迟。验证当旧 leader 网络慢时，较小的 `requestTimeout` 能触发 view change 切换到快节点，从而用 3/4 节点（f=1, n=4）快速达成共识，提升吞吐量和降低延迟。
+
+```bash
+./run_asymmetric_timeout_benchmark.sh [SkipBuild] [ResumeDir]
+```
+
+**前置条件：**
+- 节点上已安装 `iproute2`（`tc` 命令）
+- 当前用户有 `sudo` 权限
+- `set_asymmetric_latency.sh` 可用
+
+**核心假设：**
+- Node 0 = 初始 leader，延迟高 → 整体共识慢
+- 小 requestTimeout → 触发 view change → leader 切换到 Node 1
+- Node 1/2/3 之间低延迟 → 共识只需 3 节点 → 吞吐恢复
+- 大 requestTimeout → 不触发 view change → 忍受高延迟
+
+**实验矩阵（二维）：**
+- **Leader（Node 0）延迟**: 0, 50, 100, 200, 500 ms
+- **requestTimeout**: 500, 1000, 2000, 5000, 10000 ms
+
+**固定参数：** `batchSize=500, batchTimeout=100, workload=1000 ops/s × 512 bytes`
+
+**每组实验运行 90 秒。** 外层循环按 leader 延迟分组以减少 `tc netem` 切换次数。
+
+**额外提取的指标：**
+- `view_change_log_entries` — 所有 server log 中 view change 事件总数
+- `max_regency` — 最终达到的最大 regency 值（view change 成功次数）
+
+**汇总报告自动分析：**
+- 每个 leader 延迟级别下的最优 requestTimeout
+- 有/无 view change 的吞吐 & 延迟对比
+- view change 过多（requestTimeout 太小）的检测
+- 最优 requestTimeout 是否随 leader 网络条件变化的结论
+
+**输出：**
+- `asymmetric_timeout_benchmark_results/<experiment>/results.csv`
+- `asymmetric_timeout_benchmark_results/<experiment>/summary.txt`
+- `asymmetric_timeout_benchmark_results/<experiment>/logs/` — 包含所有 4 个 replica 的日志
+
+> 实验结束后自动恢复网络（移除非对称延迟）并恢复原始 `requestTimeout`。
+
 ---
 
 ## 4. 模型训练脚本
@@ -358,18 +402,32 @@ python3 scripts/plot_dynamic.py <ExperimentDir>
 
 ## 6. 工具脚本
 
-### `set_latency.sh` — 网络延迟注入
+### `set_latency.sh` — 对称网络延迟注入
 
-通过 `tc netem` 在所有节点上设置人工网络延迟。被 `run_network_timeout_benchmark.sh` 调用。
+通过 `tc netem` 在所有节点上设置**相同**的人工网络延迟。被 `run_network_timeout_benchmark.sh` 调用。
 
 ```bash
 ./set_latency.sh <delay_in_ms>
 # 示例：
-./set_latency.sh 50   # 添加 50ms 延迟
-./set_latency.sh 0    # 移除延迟
+./set_latency.sh 50   # 所有节点添加 50ms 延迟
+./set_latency.sh 0    # 移除所有延迟
 ```
 
 > 使用 `ens5` 网络接口（AWS 当前代实例标准接口）。
+
+### `set_asymmetric_latency.sh` — 非对称网络延迟注入
+
+为每个 replica 节点分别设置**不同**的网络延迟（client 节点不受影响）。被 `run_asymmetric_timeout_benchmark.sh` 调用。
+
+```bash
+./set_asymmetric_latency.sh <delay_node0> <delay_node1> <delay_node2> <delay_node3>
+# 示例：
+./set_asymmetric_latency.sh 200 0 0 0    # 只对 leader (Node 0) 注入 200ms 延迟
+./set_asymmetric_latency.sh 100 0 0 50   # Node 0: 100ms, Node 3: 50ms
+./set_asymmetric_latency.sh 0 0 0 0      # 清除所有延迟
+```
+
+> 与 `set_latency.sh` 的区别：后者对所有节点设置相同延迟，本脚本支持 per-node 独立设置。
 
 ### `cleanup_tmp_files.sh` — 清理临时文件
 
@@ -466,6 +524,12 @@ dynamic_benchmark_results/            # run_dynamic_benchmark.sh 结果
     logs/
 request_timeout_benchmark_results/    # run_request_timeout_benchmark.sh 结果
 network_timeout_benchmark_results/    # run_network_timeout_benchmark.sh 结果
+asymmetric_timeout_benchmark_results/ # run_asymmetric_timeout_benchmark.sh 结果
+  experiment_XXXXXXXX_XXXXXX/
+    results.csv
+    summary.txt
+    progress.txt
+    logs/
 saturation_benchmark_results/         # run_saturation_benchmark.sh 结果
 train_results/                        # run_train_model.sh 训练日志
   train_XXXXXXXX_XXXXXX/
