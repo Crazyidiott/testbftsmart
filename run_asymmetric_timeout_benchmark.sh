@@ -39,10 +39,10 @@ FIXED_BATCH_TIMEOUT=100
 
 # 只对 leader (Node 0) 注入的延迟值（ms）
 # 其他 replica 节点保持 0ms 延迟
-LEADER_DELAYS=(0 50 100 200 500)
+LEADER_DELAYS=(0 50 100 200)
 
 # 要测试的 requestTimeout 值列表（ms）
-REQUEST_TIMEOUTS=(500 1000 2000 5000 10000)
+REQUEST_TIMEOUTS=(200 500 1000 2000 5000 10000)
 
 # 固定的 workload: "rate, request_size"
 # 使用中等负载以清晰观测 view change 的效果
