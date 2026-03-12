@@ -41,6 +41,7 @@ import bftsmart.demo.rlWrapper.ConfigChangeRequest;
 import bftsmart.demo.rlWrapper.RLAgentConnector;
 import bftsmart.tom.MessageContext;
 import bftsmart.tom.ServiceReplica;
+import bftsmart.tom.core.messages.TOMMessage;
 import bftsmart.tom.server.defaultservices.CommandsInfo;
 import bftsmart.tom.server.defaultservices.DefaultRecoverable;
 import bftsmart.tom.util.Storage;
@@ -425,10 +426,21 @@ public final class ThroughputLatencyServer extends DefaultRecoverable{
             
 
             readOnly = msgCtx.readOnly;
-                    
-            msgCtx.getFirstInBatch().executedTime = System.nanoTime();
-            
-            long latency = msgCtx.getFirstInBatch().executedTime - msgCtx.getFirstInBatch().receptionTime;
+
+            // Use the individual request's receptionTime for per-request latency.
+            // This ensures that re-admitted (previously flow-control-dropped) requests
+            // contribute their full waiting time to the latency statistics.
+            TOMMessage currentReq = msgCtx.getCurrentRequest();
+            TOMMessage firstReq = msgCtx.getFirstInBatch();
+            long executedTimeNow = System.nanoTime();
+            firstReq.executedTime = executedTimeNow;
+
+            long latency;
+            if (currentReq != null && currentReq.receptionTime > 0) {
+                latency = executedTimeNow - currentReq.receptionTime;
+            } else {
+                latency = executedTimeNow - firstReq.receptionTime;
+            }
             totalLatency.store(latency);
             timeBasedTotalLatency.addAndGet(latency);
             timeBasedLatSamples.incrementAndGet();

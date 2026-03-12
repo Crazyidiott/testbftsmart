@@ -18,7 +18,7 @@ package bftsmart.clientsmanagement;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.SignatureException;
-import java.util.TreeSet;
+import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 import org.slf4j.Logger;
@@ -50,8 +50,9 @@ public class ClientData {
     private RequestList orderedRequests = new RequestList(MAX_SIZE_ORDERED_REQUESTS);
     private RequestList replyStore = new RequestList(MAX_SIZE_ORDERED_REQUESTS);
 
-    // Track sequence numbers dropped by flow control so forwarded retries can bypass the replay check
-    private final TreeSet<Integer> flowControlDroppedSeqs = new TreeSet<>();
+    // Track sequence numbers dropped by flow control so forwarded retries can bypass the replay check.
+    // Value: {receptionTime (nanos), receptionTimestamp (millis)} at the moment the request first arrived.
+    private final TreeMap<Integer, long[]> flowControlDroppedSeqs = new TreeMap<>();
 
     private Signature signatureVerificator = null;
     
@@ -180,11 +181,15 @@ public class ClientData {
         return this.replyStore;
     }
 
-    public void addFlowControlDrop(int seq) {
-        flowControlDroppedSeqs.add(seq);
+    public void addFlowControlDrop(int seq, long receptionTime, long receptionTimestamp) {
+        flowControlDroppedSeqs.put(seq, new long[]{receptionTime, receptionTimestamp});
     }
 
-    public boolean removeFlowControlDrop(int seq) {
+    /**
+     * Remove a flow-control-dropped sequence and return its original reception times.
+     * @return {receptionTime, receptionTimestamp} or null if not found
+     */
+    public long[] removeFlowControlDrop(int seq) {
         return flowControlDroppedSeqs.remove(seq);
     }
 

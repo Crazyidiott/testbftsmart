@@ -333,18 +333,22 @@ public class ClientsManager {
 
             // Check: was this request dropped by flow control rather than truly ordered?
             // If so, re-admit it into pending to prevent a needless view change.
-            if (clientData.removeFlowControlDrop(request.getSequence())) {
+            long[] originalTimes = clientData.removeFlowControlDrop(request.getSequence());
+            if (originalTimes != null) {
                 if (clientData.getPendingRequests().getBySequence(request.getSequence()) == null) {
                     request.recvFromClient = false;
-                    request.receptionTime = System.nanoTime();
-                    request.receptionTimestamp = System.currentTimeMillis();
+                    // Restore the original reception time so that latency measurement
+                    // (executedTime - receptionTime) includes the drop waiting period.
+                    request.receptionTime = originalTimes[0];
+                    request.receptionTimestamp = originalTimes[1];
                     clientData.getPendingRequests().add(request);
                     clientData.setLastMessageReceivedTime(request.receptionTime);
                     if (timer != null) {
                         timer.watch(request);
                     }
-                    logger.info("[FLOW-CTRL-READMIT] Re-admitted forwarded seq={} client={} into pending",
-                            request.getSequence(), request.getSender());
+                    logger.info("[FLOW-CTRL-READMIT] Re-admitted forwarded seq={} client={} into pending (drop wait={}ms)",
+                            request.getSequence(), request.getSender(),
+                            System.currentTimeMillis() - originalTimes[1]);
                 }
                 clientData.clientLock.unlock();
                 return true;
@@ -382,7 +386,7 @@ public class ClientsManager {
                 //but that scenario is far less damaging than the permanent client death caused by sequence gaps under normal load.
                 clientData.setLastMessageReceived(request.getSequence());
                 clientData.setLastMessageReceivedTime(request.receptionTime);
-                clientData.addFlowControlDrop(request.getSequence());
+                clientData.addFlowControlDrop(request.getSequence(), request.receptionTime, request.receptionTimestamp);
 
                 clientData.clientLock.unlock();
                 String source = fromClient ? "client" : "forwarded";

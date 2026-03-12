@@ -374,6 +374,7 @@ public class ServiceReplica {
                                 
                                 msgCtx.setLastInBatch();
                             }   request.deliveryTime = System.nanoTime();
+                            msgCtx.setCurrentRequest(request);
                             if (executor instanceof BatchExecutable) {
                                 
                                logger.debug("Batching request from " + request.getSender());

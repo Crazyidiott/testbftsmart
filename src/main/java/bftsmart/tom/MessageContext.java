@@ -15,13 +15,13 @@ limitations under the License.
 */
 package bftsmart.tom;
 
-import bftsmart.consensus.messages.ConsensusMessage;
-import bftsmart.tom.core.messages.TOMMessage;
-import bftsmart.tom.core.messages.TOMMessageType;
-
 import java.io.Serializable;
 import java.util.Random;
 import java.util.Set;
+
+import bftsmart.consensus.messages.ConsensusMessage;
+import bftsmart.tom.core.messages.TOMMessage;
+import bftsmart.tom.core.messages.TOMMessageType;
 
 /**
  * This class represents the whole context of a request ordered in the system.
@@ -53,6 +53,7 @@ public class MessageContext implements Serializable {
     private final Set<ConsensusMessage> proof;
                 
     private final TOMMessage firstInBatch; //to be replaced by a statistics class
+    private TOMMessage currentRequest; // the individual request this context belongs to
     private boolean lastInBatch; // indicates that the command is the last in the batch. Used for logging
     private final boolean noOp;
     
@@ -257,6 +258,14 @@ public class MessageContext implements Serializable {
      */
     public TOMMessage getFirstInBatch() {
         return firstInBatch;
+    }
+
+    public void setCurrentRequest(TOMMessage request) {
+        this.currentRequest = request;
+    }
+
+    public TOMMessage getCurrentRequest() {
+        return currentRequest;
     }
 
     public void setLastInBatch() {
