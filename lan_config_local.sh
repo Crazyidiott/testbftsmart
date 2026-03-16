@@ -14,6 +14,9 @@ SSH_AUTH_MODE="password"
 # Password file for ssh
 PASS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lan_ssh_password.txt"
 
+# Optional separate sudo password file. Defaults to the same password file.
+SUDO_PASS_FILE="${PASS_FILE}"
+
 # Client runs on the local machine.
 CLIENT_IS_LOCAL="true"
 

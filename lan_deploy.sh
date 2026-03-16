@@ -157,8 +157,8 @@ for i in "${!REPLICA_NODES_RESOLVED[@]}"; do
     remote_ssh "$host" "
         if ! type java > /dev/null 2>&1; then
             echo \"    Installing Java...\"
-            sudo apt-get update -qq
-            sudo apt-get install -y openjdk-11-jdk -qq
+            ${SUDO_CMD} apt-get update -qq
+            ${SUDO_CMD} apt-get install -y openjdk-11-jdk -qq
         else
             echo \"    Java already installed.\"
         fi

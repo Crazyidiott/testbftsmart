@@ -34,6 +34,23 @@ if [ -n "${PASS_FILE:-}" ] && [ -z "${PASS:-}" ]; then
     PASS=$(tr -d '\r\n' < "${PASS_FILE}")
 fi
 
+if [ -n "${SUDO_PASS_FILE:-}" ] && [ -z "${SUDO_PASS:-}" ]; then
+    if [ ! -f "${SUDO_PASS_FILE}" ]; then
+        echo "ERROR: SUDO_PASS_FILE does not exist: ${SUDO_PASS_FILE}" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+
+    SUDO_PASS=$(tr -d '\r\n' < "${SUDO_PASS_FILE}")
+fi
+
+# Fall back to SSH password for sudo when not set explicitly.
+SUDO_PASS="${SUDO_PASS:-${PASS:-}}"
+SUDO_PASS_ESCAPED=${SUDO_PASS//\'/\'\\\'\'}
+SUDO_CMD="sudo -n"
+if [ -n "${SUDO_PASS:-}" ]; then
+    SUDO_CMD="printf '%s\\n' '${SUDO_PASS_ESCAPED}' | sudo -S -p ''"
+fi
+
 if [ ${#REPLICA_NODES[@]} -gt 0 ]; then
     REPLICA_NODES_RESOLVED=("${REPLICA_NODES[@]}")
 elif [ ${#NODES[@]} -gt 0 ]; then

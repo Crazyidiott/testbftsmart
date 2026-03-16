@@ -53,10 +53,10 @@ for i in $(seq 0 $((NUM_REPLICAS - 1))); do
     fi
 
     remote_ssh "$host" "
-        sudo tc qdisc del dev $INTERFACE root > /dev/null 2>&1
+        ${SUDO_CMD} tc qdisc del dev $INTERFACE root > /dev/null 2>&1
 
         if [ \"$delay\" -gt 0 ]; then
-            sudo tc qdisc add dev $INTERFACE root netem delay ${delay}ms
+            ${SUDO_CMD} tc qdisc add dev $INTERFACE root netem delay ${delay}ms
             CHECK=\$(tc qdisc show dev $INTERFACE | grep netem)
             echo \"    Applied: \$CHECK\"
         else

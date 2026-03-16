@@ -19,9 +19,9 @@ for i in "${!REPLICA_NODES_RESOLVED[@]}"; do
         echo '    [System] Installing python3-venv...'
         if command -v sudo >/dev/null; then
             echo '        DEBUG: sudo found. Attempting update...'
-            sudo apt-get update
+            ${SUDO_CMD} apt-get update
             echo '        DEBUG: Update done. Installing packages...'
-            sudo apt-get install -y python3-venv python3-pip
+            ${SUDO_CMD} apt-get install -y python3-venv python3-pip
         else
             echo '        WARNING: sudo not found, skipping system install. Hoping dependencies exist.'
         fi
