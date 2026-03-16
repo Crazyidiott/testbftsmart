@@ -31,7 +31,7 @@
 
 set -e
 
-source ./lan_config.sh
+source ./lan_connection.sh
 
 # ============= 配置参数 =============
 

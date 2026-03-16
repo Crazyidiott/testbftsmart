@@ -21,5 +21,6 @@ lib/
 experiments/
 *.log
 rlenv/
+lan_ssh_password.txt
 *.txt
 *.csv

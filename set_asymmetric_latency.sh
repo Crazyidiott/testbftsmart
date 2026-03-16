@@ -19,9 +19,9 @@
 #
 # ==============================================================================
 
-source ./lan_config.sh
+source ./lan_connection.sh
 
-NUM_REPLICAS=4
+NUM_REPLICAS=${#REPLICA_NODES_RESOLVED[@]}
 INTERFACE="ens5"
 
 if [ "$#" -lt "$NUM_REPLICAS" ]; then
@@ -40,9 +40,11 @@ echo "=========================================================="
 echo "ACTION: Setting ASYMMETRIC latency on replica nodes."
 echo "=========================================================="
 
+delays=("$@")
+
 for i in $(seq 0 $((NUM_REPLICAS - 1))); do
-    delay=${!((i + 1))}  # $1, $2, $3, $4
-    host=${NODES[$i]}
+    delay=${delays[$i]}
+    host=${REPLICA_NODES_RESOLVED[$i]}
 
     if [ "$delay" -eq 0 ]; then
         echo "Node $i ($host): CLEARING delay"
@@ -50,7 +52,7 @@ for i in $(seq 0 $((NUM_REPLICAS - 1))); do
         echo "Node $i ($host): Setting ${delay}ms delay"
     fi
 
-    ssh -o StrictHostKeyChecking=no -i "$KEY" "$USER@$host" "
+    remote_ssh "$host" "
         sudo tc qdisc del dev $INTERFACE root > /dev/null 2>&1
 
         if [ \"$delay\" -gt 0 ]; then

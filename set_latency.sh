@@ -1,7 +1,6 @@
 #!/bin/bash
-
 # Load configuration
-source ./lan_config.sh
+source ./lan_connection.sh
 
 DELAY=$1
 
@@ -25,11 +24,11 @@ else
 fi
 echo "=========================================================="
 
-for i in "${!NODES[@]}"; do
-    host=${NODES[$i]}
+for i in "${!REPLICA_NODES_RESOLVED[@]}"; do
+    host=${REPLICA_NODES_RESOLVED[$i]}
     echo "Processing Node $i ($host)..."
 
-    ssh -o StrictHostKeyChecking=no -i "$KEY" "$USER@$host" "
+    remote_ssh "$host" "
         # 1. Clear existing qdisc (queueing discipline) rules
         # We suppress stderr in case there are no rules to delete
         sudo tc qdisc del dev $INTERFACE root > /dev/null 2>&1
@@ -47,6 +46,24 @@ for i in "${!NODES[@]}"; do
         fi
     "
 done
+
+if [ "${CLIENT_IS_LOCAL}" != "true" ]; then
+    echo "Processing Client (${CLIENT_HOST})..."
+    remote_ssh "${CLIENT_HOST}" "
+        sudo tc qdisc del dev $INTERFACE root > /dev/null 2>&1
+
+        if [ \"$DELAY\" -gt 0 ]; then
+            echo \"    Applying ${DELAY}ms delay...\"
+            sudo tc qdisc add dev $INTERFACE root netem delay ${DELAY}ms
+            CHECK=\$(tc qdisc show dev $INTERFACE | grep netem)
+            echo \"    Current Config: \$CHECK\"
+        else
+            echo \"    Latency cleared.\"
+        fi
+    "
+else
+    echo "Skipping local client latency injection."
+fi
 
 echo "=========================================================="
 echo "Network configuration update complete."

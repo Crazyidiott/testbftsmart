@@ -35,7 +35,7 @@
 set -e  # 出错时退出
 
 # 加载 LAN 配置（获取节点地址等变量）
-source ./lan_config.sh
+source ./lan_connection.sh
 
 # ============= 配置参数 =============
 
@@ -114,7 +114,7 @@ if [[ "$TRAIN_ALGORITHM" == "ALL" ]] || [[ "$TRAIN_ALGORITHM" == "BAYESIAN" ]]; 
     cp results/agent_0.log "${EXPERIMENT_DIR}/agent_bayesian.log" 2>/dev/null || true
     
     # 检查模型是否生成
-    if ssh -i "$KEY" "$USER@${NODES[0]}" "test -f ${REMOTE_PROJECT_PATH}/server_agent/bo_model.pkl" 2>/dev/null; then
+    if remote_file_exists "${REPLICA_NODES_RESOLVED[0]}" "${REMOTE_PROJECT_PATH}/server_agent/bo_model.pkl" 2>/dev/null; then
         echo "    ✅ Model saved: bo_model.pkl"
     else
         echo "    ⚠️  Model file not found (may save on next run)"
@@ -151,7 +151,7 @@ if [[ "$TRAIN_ALGORITHM" == "ALL" ]] || [[ "$TRAIN_ALGORITHM" == "PPO" ]]; then
     cp results/agent_0.log "${EXPERIMENT_DIR}/agent_ppo.log" 2>/dev/null || true
     
     # 检查模型是否生成
-    if ssh -i "$KEY" "$USER@${NODES[0]}" "test -f ${REMOTE_PROJECT_PATH}/server_agent/ppo_model.pth" 2>/dev/null; then
+    if remote_file_exists "${REPLICA_NODES_RESOLVED[0]}" "${REMOTE_PROJECT_PATH}/server_agent/ppo_model.pth" 2>/dev/null; then
         echo "    ✅ Model saved: ppo_model.pth"
     else
         echo "    ⚠️  Model file not found (may save on next run)"
