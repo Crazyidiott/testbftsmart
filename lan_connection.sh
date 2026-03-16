@@ -5,7 +5,13 @@ if [ -n "${LAN_CONNECTION_HELPERS_LOADED:-}" ]; then
 fi
 LAN_CONNECTION_HELPERS_LOADED=1
 
-LAN_CONFIG_FILE="${LAN_CONFIG_FILE:-./lan_config.sh}"
+if [ -z "${LAN_CONFIG_FILE:-}" ]; then
+    if [ -f "./lan_config_local.sh" ]; then
+        LAN_CONFIG_FILE="./lan_config_local.sh"
+    else
+        LAN_CONFIG_FILE="./lan_config.sh"
+    fi
+fi
 
 if [ ! -f "${LAN_CONFIG_FILE}" ]; then
     echo "ERROR: LAN config file not found: ${LAN_CONFIG_FILE}" >&2
