@@ -11,10 +11,9 @@ if [ -z "$DELAY" ]; then
     exit 1
 fi
 
-# Detected interface on AWS is usually ens5. 
-# If some machines differ, we might need to detect it dynamically, 
-# but ens5 is standard for current gen AWS instances.
-INTERFACE="ens5"
+# Optional override:
+#   LATENCY_INTERFACE=<iface> ./set_latency.sh <delay_ms>
+INTERFACE_OVERRIDE="${LATENCY_INTERFACE:-}"
 
 echo "=========================================================="
 if [ "$DELAY" -eq 0 ]; then
@@ -29,17 +28,30 @@ for i in "${!REPLICA_NODES_RESOLVED[@]}"; do
     echo "Processing Node $i ($host)..."
 
     remote_ssh "$host" "
+        IFACE=\"${INTERFACE_OVERRIDE}\"
+        if [ -z \"\$IFACE\" ]; then
+            IFACE=\$(ip route show default 2>/dev/null | awk '/default/ {print \$5; exit}')
+        fi
+        if [ -z \"\$IFACE\" ]; then
+            IFACE=\$(ip -o link show | awk -F': ' '\$2 !~ /lo/ {print \$2; exit}')
+        fi
+        if [ -z \"\$IFACE\" ]; then
+            echo \"    ERROR: Cannot detect network interface on host\"
+            exit 1
+        fi
+        echo \"    Interface: \$IFACE\"
+
         # 1. Clear existing qdisc (queueing discipline) rules
         # We suppress stderr in case there are no rules to delete
-        ${SUDO_CMD} tc qdisc del dev $INTERFACE root > /dev/null 2>&1
+        ${SUDO_CMD} tc qdisc del dev \$IFACE root > /dev/null 2>&1
 
         # 2. If delay > 0, add new netem rule
         if [ \"$DELAY\" -gt 0 ]; then
             echo \"    Applying ${DELAY}ms delay...\"
-            ${SUDO_CMD} tc qdisc add dev $INTERFACE root netem delay ${DELAY}ms
+            ${SUDO_CMD} tc qdisc add dev \$IFACE root netem delay ${DELAY}ms
             
             # Verify
-            CHECK=\$(tc qdisc show dev $INTERFACE | grep netem)
+            CHECK=\$(tc qdisc show dev \$IFACE | grep netem)
             echo \"    Current Config: \$CHECK\"
         else
             echo \"    Latency cleared.\"
@@ -50,12 +62,25 @@ done
 if [ "${CLIENT_IS_LOCAL}" != "true" ]; then
     echo "Processing Client (${CLIENT_HOST})..."
     remote_ssh "${CLIENT_HOST}" "
-        ${SUDO_CMD} tc qdisc del dev $INTERFACE root > /dev/null 2>&1
+        IFACE=\"${INTERFACE_OVERRIDE}\"
+        if [ -z \"\$IFACE\" ]; then
+            IFACE=\$(ip route show default 2>/dev/null | awk '/default/ {print \$5; exit}')
+        fi
+        if [ -z \"\$IFACE\" ]; then
+            IFACE=\$(ip -o link show | awk -F': ' '\$2 !~ /lo/ {print \$2; exit}')
+        fi
+        if [ -z \"\$IFACE\" ]; then
+            echo \"    ERROR: Cannot detect network interface on client host\"
+            exit 1
+        fi
+        echo \"    Interface: \$IFACE\"
+
+        ${SUDO_CMD} tc qdisc del dev \$IFACE root > /dev/null 2>&1
 
         if [ \"$DELAY\" -gt 0 ]; then
             echo \"    Applying ${DELAY}ms delay...\"
-            ${SUDO_CMD} tc qdisc add dev $INTERFACE root netem delay ${DELAY}ms
-            CHECK=\$(tc qdisc show dev $INTERFACE | grep netem)
+            ${SUDO_CMD} tc qdisc add dev \$IFACE root netem delay ${DELAY}ms
+            CHECK=\$(tc qdisc show dev \$IFACE | grep netem)
             echo \"    Current Config: \$CHECK\"
         else
             echo \"    Latency cleared.\"

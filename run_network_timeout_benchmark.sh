@@ -42,8 +42,8 @@ set -e
 # ============= 配置参数 =============
 
 # 固定的 batchSize 和 batchTimeout
-FIXED_BATCH_SIZE=500
-FIXED_BATCH_TIMEOUT=100
+FIXED_BATCH_SIZE=200
+FIXED_BATCH_TIMEOUT=50
 
 # 要测试的网络延迟值（单位：ms）
 # 0 = 无延迟 (LAN baseline)
@@ -153,7 +153,7 @@ import sys
 log_file = "$log_file"
 output_file = "$output_file"
 
-pattern = r'thr=([0-9.]+), lat=([0-9.]+) us \| avgSize=([0-9.]+) bytes, arrivalRate=([0-9.]+) req/s \| Memory: ([0-9]+)MB/([0-9]+)MB \(([0-9.]+)%\)'
+pattern = r'thr=([0-9.]+), lat=([0-9.]+) us(?:, consLat=[0-9.]+ us)? \| avgSize=([0-9.]+) bytes, arrivalRate=([0-9.]+) req/s \| Memory: ([0-9]+)MB/([0-9]+)MB \(([0-9.]+)%\)'
 
 throughputs = []
 latencies = []

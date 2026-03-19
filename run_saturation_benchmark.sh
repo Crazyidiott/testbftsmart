@@ -40,14 +40,13 @@ BATCH_CONFIGS=(
     "100,50"      # 小批次短超时
     "500,100"     # 中等配置（常用基准）
     "1000,100"    # 大批次中等超时
-    "2000,200"    # 大批次长超时
 )
 
 # 要测试的消息大小 (bytes)
 MESSAGE_SIZES=(512 1024)
 
 # 逐步递增的目标发送速率 (ops/s，必须升序排列)
-RATES=(15000 20000 25000 30000 35000 40000 45000 50000)
+RATES=(2000 3000 4000 5000 6000 7000 8000 9000 10000)
 
 # 饱和检测阈值：当 throughput / target_rate < 此值时认为已饱和
 SATURATION_THRESHOLD=0.85
@@ -128,12 +127,13 @@ create_single_workload_config() {
     local duration=$2
     local rate=$3
     local request_size=$4
-    local num_threads=10
+    local num_threads=20
+    local rate_warmup=10  # 预热阶段使用较低速率，帮助系统稳定连接和状态
     local rate_per_thread=$((rate / num_threads))
 
     echo "# Duration(s), Rate(ops/sec per thread), RequestSize(bytes)" > "$TEMP_WORKLOAD_CONFIG"
     echo "# Phase 1: warmup" >> "$TEMP_WORKLOAD_CONFIG"
-    echo "${warmup}, ${rate_per_thread}, ${request_size}" >> "$TEMP_WORKLOAD_CONFIG"
+    echo "${warmup}, ${rate_warmup}, ${request_size}" >> "$TEMP_WORKLOAD_CONFIG"
     echo "# Phase 2: measurement" >> "$TEMP_WORKLOAD_CONFIG"
     echo "${duration}, ${rate_per_thread}, ${request_size}" >> "$TEMP_WORKLOAD_CONFIG"
 }
@@ -223,6 +223,62 @@ else:
 PYEOF
 }
 
+# 解析 client log 提取 Phase 2 发送速率统计
+parse_client_log_phase2() {
+    local log_file=$1
+    local output_file=$2
+
+    python3 << PYEOF
+import re
+import sys
+
+log_file = "$log_file"
+output_file = "$output_file"
+
+phase2_started = False
+rates = []
+final_avg_send_rate = 0.0
+
+throughput_pattern = re.compile(r'\[Total Client Throughput\]\s+([0-9]+)\s+ops/sec')
+final_avg_pattern = re.compile(r'\[Client Workload\] Average send rate:\s+([0-9.]+)\s+ops/sec')
+
+try:
+    with open(log_file, 'r') as f:
+        for raw_line in f:
+            line = raw_line.strip()
+
+            m_final = final_avg_pattern.search(line)
+            if m_final:
+                final_avg_send_rate = float(m_final.group(1))
+
+            if 'Starting Phase 2:' in line:
+                phase2_started = True
+                continue
+
+            if '[Client Workload] FINAL STATISTICS' in line:
+                break
+
+            if phase2_started:
+                m_thr = throughput_pattern.search(line)
+                if m_thr:
+                    rates.append(float(m_thr.group(1)))
+except Exception as e:
+    print(f"Error parsing {log_file}: {e}", file=sys.stderr)
+
+if rates:
+    avg_rate = sum(rates) / len(rates)
+    min_rate = min(rates)
+    max_rate = max(rates)
+    with open(output_file, 'w') as f:
+        f.write(f"{avg_rate:.2f},{min_rate:.0f},{max_rate:.0f},{len(rates)},{final_avg_send_rate:.2f}\n")
+    print(f"Parsed client phase2 rates: avg={avg_rate:.2f}, min={min_rate:.0f}, max={max_rate:.0f}, samples={len(rates)}")
+else:
+    with open(output_file, 'w') as f:
+        f.write(f"0,0,0,0,{final_avg_send_rate:.2f}\n")
+    print("No phase2 throughput samples found in client log")
+PYEOF
+}
+
 # ============= 主逻辑 =============
 
 echo "============================================================"
@@ -242,7 +298,7 @@ mkdir -p "${EXPERIMENT_DIR}/logs"
 # 初始化结果 CSV
 RESULTS_CSV="${EXPERIMENT_DIR}/results.csv"
 if [[ "$RESUME_MODE" == false ]] || [[ ! -f "$RESULTS_CSV" ]]; then
-    echo "batch_size,batch_timeout,message_size,target_rate,avg_throughput,avg_latency_us,avg_msg_size_bytes,avg_arrival_rate,avg_mem_used_mb,avg_mem_max_mb,avg_mem_percent,sample_count" > "$RESULTS_CSV"
+    echo "batch_size,batch_timeout,message_size,target_rate,avg_throughput,avg_latency_us,avg_msg_size_bytes,avg_arrival_rate,avg_mem_used_mb,avg_mem_max_mb,avg_mem_percent,sample_count,client_phase2_avg_send_rate,client_phase2_min_send_rate,client_phase2_max_send_rate,client_phase2_sample_count,client_final_avg_send_rate" > "$RESULTS_CSV"
 fi
 
 # 显示续跑进度
@@ -357,7 +413,19 @@ for msg_size in "${MESSAGE_SIZES[@]}"; do
             # 读取解析结果
             if [[ -f "$METRICS_TMP" ]]; then
                 METRICS=$(cat "$METRICS_TMP")
-                echo "${bs},${bt},${msg_size},${rate},${METRICS}" >> "$RESULTS_CSV"
+
+                # 解析 client phase2 发送速率（避免被warmup与尾部收尾影响）
+                CLIENT_LOG="results/client.log"
+                CLIENT_METRICS_TMP="${EXPERIMENT_DIR}/logs/client_metrics_${LOG_PREFIX}.tmp"
+                parse_client_log_phase2 "$CLIENT_LOG" "$CLIENT_METRICS_TMP"
+
+                CLIENT_METRICS="0,0,0,0,0"
+                if [[ -f "$CLIENT_METRICS_TMP" ]]; then
+                    CLIENT_METRICS=$(cat "$CLIENT_METRICS_TMP")
+                    rm -f "$CLIENT_METRICS_TMP"
+                fi
+
+                echo "${bs},${bt},${msg_size},${rate},${METRICS},${CLIENT_METRICS}" >> "$RESULTS_CSV"
 
                 # 提取 avg_throughput 和 avg_arrival_rate 用于饱和检测
                 AVG_THR=$(echo "$METRICS" | cut -d',' -f1)
@@ -408,7 +476,7 @@ else:
                 rm -f "$METRICS_TMP"
             else
                 echo "      WARNING: Failed to parse metrics"
-                echo "${bs},${bt},${msg_size},${rate},0,0,0,0,0,0,0,0" >> "$RESULTS_CSV"
+                echo "${bs},${bt},${msg_size},${rate},0,0,0,0,0,0,0,0,0,0,0,0,0" >> "$RESULTS_CSV"
             fi
 
             # 保存日志

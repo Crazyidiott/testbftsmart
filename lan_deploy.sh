@@ -280,10 +280,10 @@ echo ">>> [Step 4] Starting Client..."
 if [ "${CLIENT_IS_LOCAL}" = "true" ]; then
     cd "${CLIENT_PROJECT_PATH}" || exit 1
     if [ -n "${WORKLOAD_CONFIG_NAME}" ]; then
-        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncDynamicClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} "config/workloads/${WORKLOAD_CONFIG_NAME}" > client.log 2>&1 &
+        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncDynamicClient 1001 15 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} "config/workloads/${WORKLOAD_CONFIG_NAME}" > client.log 2>&1 &
         echo "    [Info] Using local AsyncDynamicClient with config: ${WORKLOAD_CONFIG_NAME}"
     else
-        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
+        nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 15 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
         echo "    [Info] Using local Standard AsyncLatencyClient"
     fi
 else
@@ -291,10 +291,10 @@ else
         cd ${REMOTE_PROJECT_PATH}
         if [ -n \"${WORKLOAD_CONFIG_NAME}\" ]; then
             WORKLOAD_ARGS=\"config/workloads/${WORKLOAD_CONFIG_NAME}\"
-            nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncDynamicClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} \${WORKLOAD_ARGS} > client.log 2>&1 &
+            nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncDynamicClient 1001 15 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} \${WORKLOAD_ARGS} > client.log 2>&1 &
             echo \"    [Info] Using AsyncDynamicClient with config: ${WORKLOAD_CONFIG_NAME}\"
         else
-            nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 10 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
+            nohup ./runscripts/smartrun.sh bftsmart.demo.microbenchmarks.AsyncLatencyClient 1001 15 200000 1024 0 false false nosig ${CLIENT_RATE_PER_THREAD} > client.log 2>&1 &
             echo \"    [Info] Using Standard AsyncLatencyClient\"
         fi
     "

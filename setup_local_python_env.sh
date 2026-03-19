@@ -29,7 +29,9 @@ fi
 echo "    [System] System packages handling complete."
 
 echo "    [Venv] Checking virtual environment..."
-if [ ! -f 'rlenv/bin/python3' ] || ! ./rlenv/bin/python3 --version > /dev/null 2>&1; then
+if [ ! -f 'rlenv/bin/python3' ] \
+    || ! ./rlenv/bin/python3 --version > /dev/null 2>&1 \
+    || ! ./rlenv/bin/python3 -m pip --version > /dev/null 2>&1; then
     echo "        Creating new venv (rlenv)..."
     rm -rf rlenv
     python3 -m venv rlenv
@@ -39,8 +41,8 @@ fi
 
 echo "    [Pip] Installing requirements..."
 if [ -f requirements.txt ]; then
-    ./rlenv/bin/pip install -q --upgrade pip
-    ./rlenv/bin/pip install -q -r requirements.txt
+    ./rlenv/bin/python3 -m pip install -q --upgrade pip
+    ./rlenv/bin/python3 -m pip install -q -r requirements.txt
 else
     echo "        ERROR: requirements.txt missing!"
     exit 1

@@ -22,7 +22,7 @@
 source ./lan_connection.sh
 
 NUM_REPLICAS=${#REPLICA_NODES_RESOLVED[@]}
-INTERFACE="ens5"
+INTERFACE_OVERRIDE="${LATENCY_INTERFACE:-}"
 
 if [ "$#" -lt "$NUM_REPLICAS" ]; then
     echo "Usage: ./set_asymmetric_latency.sh <delay_node0> <delay_node1> <delay_node2> <delay_node3>"
@@ -53,11 +53,24 @@ for i in $(seq 0 $((NUM_REPLICAS - 1))); do
     fi
 
     remote_ssh "$host" "
-        ${SUDO_CMD} tc qdisc del dev $INTERFACE root > /dev/null 2>&1
+        IFACE=\"${INTERFACE_OVERRIDE}\"
+        if [ -z \"\$IFACE\" ]; then
+            IFACE=\$(ip route show default 2>/dev/null | awk '/default/ {print \$5; exit}')
+        fi
+        if [ -z \"\$IFACE\" ]; then
+            IFACE=\$(ip -o link show | awk -F': ' '\$2 !~ /lo/ {print \$2; exit}')
+        fi
+        if [ -z \"\$IFACE\" ]; then
+            echo \"    ERROR: Cannot detect network interface on host\"
+            exit 1
+        fi
+
+        echo \"    Interface: \$IFACE\"
+        ${SUDO_CMD} tc qdisc del dev \$IFACE root > /dev/null 2>&1
 
         if [ \"$delay\" -gt 0 ]; then
-            ${SUDO_CMD} tc qdisc add dev $INTERFACE root netem delay ${delay}ms
-            CHECK=\$(tc qdisc show dev $INTERFACE | grep netem)
+            ${SUDO_CMD} tc qdisc add dev \$IFACE root netem delay ${delay}ms
+            CHECK=\$(tc qdisc show dev \$IFACE | grep netem)
             echo \"    Applied: \$CHECK\"
         else
             echo \"    Cleared.\"

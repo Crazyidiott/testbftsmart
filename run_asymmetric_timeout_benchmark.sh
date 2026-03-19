@@ -34,20 +34,31 @@ set -e
 # ============= 配置参数 =============
 
 # 固定的 batchSize 和 batchTimeout
-FIXED_BATCH_SIZE=500
-FIXED_BATCH_TIMEOUT=100
+FIXED_BATCH_SIZE=200
+FIXED_BATCH_TIMEOUT=50
 
 # 只对 leader (Node 0) 注入的延迟值（ms）
 # 其他 replica 节点保持 0ms 延迟
-LEADER_DELAYS=(0 50 100 200)
+LEADER_DELAYS_STR="${LEADER_DELAYS_OVERRIDE:-0 50 100 200}"
+read -r -a LEADER_DELAYS <<< "$LEADER_DELAYS_STR"
 
 # 要测试的 requestTimeout 值列表（ms）
-REQUEST_TIMEOUTS=(200 500 1000 2000 5000 10000)
+REQUEST_TIMEOUTS_STR="${REQUEST_TIMEOUTS_OVERRIDE:-150 250 350 500 800 1200 2000}"
+read -r -a REQUEST_TIMEOUTS <<< "$REQUEST_TIMEOUTS_STR"
 
 # 固定的 workload: "rate, request_size"
-# 使用中等负载以清晰观测 view change 的效果
-WORKLOAD_RATE=1000
+# 这里的 rate 是每线程速率。配合 lan_deploy.sh 中 15 个 client 线程，
+# 总发送速率约为 1500 ops/s（100 * 15）。
+WORKLOAD_RATE=100
 WORKLOAD_SIZE=512
+
+if [[ -n "${WORKLOAD_RATE_OVERRIDE:-}" ]]; then
+    WORKLOAD_RATE="$WORKLOAD_RATE_OVERRIDE"
+fi
+
+if [[ -n "${WORKLOAD_SIZE_OVERRIDE:-}" ]]; then
+    WORKLOAD_SIZE="$WORKLOAD_SIZE_OVERRIDE"
+fi
 
 # 是否跳过编译
 SKIP_BUILD="${1:-false}"
@@ -56,7 +67,19 @@ SKIP_BUILD="${1:-false}"
 RESUME_DIR="${2:-}"
 
 # 每个配置的运行时间（秒）
-RUN_DURATION=90
+RUN_DURATION=240
+if [[ -n "${RUN_DURATION_OVERRIDE:-}" ]]; then
+    RUN_DURATION="$RUN_DURATION_OVERRIDE"
+fi
+
+AUTO_CONFIRM="${AUTO_CONFIRM:-false}"
+
+# 突发场景开关（用于验证“requestTimeout 并非越大越好”）
+# false: 固定延迟场景；true: 周期性注入 leader 延迟突发
+ENABLE_BURST_MODE="${ENABLE_BURST_MODE:-false}"
+BURST_NORMAL_SEC="${BURST_NORMAL_SEC:-20}"
+BURST_SPIKE_SEC="${BURST_SPIKE_SEC:-3}"
+BURST_SPIKE_DELAY_MS="${BURST_SPIKE_DELAY_MS:-800}"
 
 # 结果目录
 RESULTS_DIR="asymmetric_timeout_benchmark_results"
@@ -114,10 +137,15 @@ update_request_timeout() {
     local timeout_val=$1
     local config_file="config/system.config"
 
+    if ! [[ "$timeout_val" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Invalid timeout value: $timeout_val"
+        return 1
+    fi
+
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        sed -i '' "s/system.totalordermulticast.timeout = .*/system.totalordermulticast.timeout = ${timeout_val}/g" "$config_file"
+        sed -i '' "s|^system.totalordermulticast.timeout[[:space:]]*=.*|system.totalordermulticast.timeout = ${timeout_val}|g" "$config_file"
     else
-        sed -i "s/system.totalordermulticast.timeout = .*/system.totalordermulticast.timeout = ${timeout_val}/g" "$config_file"
+        sed -i "s|^system.totalordermulticast.timeout[[:space:]]*=.*|system.totalordermulticast.timeout = ${timeout_val}|g" "$config_file"
     fi
 }
 
@@ -128,45 +156,69 @@ set_asymmetric_delay() {
     ./set_asymmetric_latency.sh "$leader_delay" 0 0 0
 }
 
-# 从 server log 提取 metrics
-parse_server_log() {
-    local log_file=$1
+start_burst_injector() {
+    local base_delay=$1
+    (
+        while true; do
+            ./set_asymmetric_latency.sh "$base_delay" 0 0 0
+            sleep "$BURST_NORMAL_SEC"
+            ./set_asymmetric_latency.sh "$BURST_SPIKE_DELAY_MS" 0 0 0
+            sleep "$BURST_SPIKE_SEC"
+        done
+    ) >/dev/null 2>&1 &
+    echo $!
+}
+
+stop_burst_injector() {
+    local pid=$1
+    local base_delay=$2
+    if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+    ./set_asymmetric_latency.sh "$base_delay" 0 0 0
+}
+
+# 从 4 个 server log 自动选择 active leader 并提取 metrics
+parse_active_leader_metrics() {
+    local log_dir=$1
     local output_file=$2
 
     python3 << PYEOF
 import re
 import sys
+import os
 
-log_file = "$log_file"
+log_dir = "$log_dir"
 output_file = "$output_file"
 
-pattern = r'thr=([0-9.]+), lat=([0-9.]+) us \| avgSize=([0-9.]+) bytes, arrivalRate=([0-9.]+) req/s \| Memory: ([0-9]+)MB/([0-9]+)MB \(([0-9.]+)%\)'
+pattern = r'thr=([0-9.]+), lat=([0-9.]+) us(?:, consLat=[0-9.]+ us)? \| avgSize=([0-9.]+) bytes, arrivalRate=([0-9.]+) req/s \| Memory: ([0-9]+)MB/([0-9]+)MB \(([0-9.]+)%\)'
 
-throughputs = []
-latencies = []
-avg_sizes = []
-arrival_rates = []
-mem_used = []
-mem_max = []
-mem_percent = []
+def extract_samples(log_file):
+    throughputs = []
+    latencies = []
+    avg_sizes = []
+    arrival_rates = []
+    mem_used = []
+    mem_max = []
+    mem_percent = []
 
-try:
-    with open(log_file, 'r') as f:
-        for line in f:
-            match = re.search(pattern, line)
-            if match:
-                throughputs.append(float(match.group(1)))
-                latencies.append(float(match.group(2)))
-                avg_sizes.append(float(match.group(3)))
-                arrival_rates.append(float(match.group(4)))
-                mem_used.append(int(match.group(5)))
-                mem_max.append(int(match.group(6)))
-                mem_percent.append(float(match.group(7)))
-except Exception as e:
-    print(f"Error parsing {log_file}: {e}", file=sys.stderr)
+    try:
+        with open(log_file, 'r') as f:
+            for line in f:
+                match = re.search(pattern, line)
+                if match:
+                    throughputs.append(float(match.group(1)))
+                    latencies.append(float(match.group(2)))
+                    avg_sizes.append(float(match.group(3)))
+                    arrival_rates.append(float(match.group(4)))
+                    mem_used.append(int(match.group(5)))
+                    mem_max.append(int(match.group(6)))
+                    mem_percent.append(float(match.group(7)))
+    except Exception as e:
+        print(f"Error parsing {log_file}: {e}", file=sys.stderr)
 
-n = len(throughputs)
-if n > 0:
+    # remove trailing cooldown zeros
     while len(throughputs) > 5 and throughputs[-1] == 0.0:
         throughputs.pop()
         latencies.pop()
@@ -186,27 +238,58 @@ if n > 0:
     mem_max = mem_max[skip:]
     mem_percent = mem_percent[skip:]
 
-    n = len(throughputs)
-    if n > 0:
-        avg_thr = sum(throughputs) / n
-        avg_lat = sum(latencies) / n
-        avg_size = sum(avg_sizes) / n
-        avg_arrival = sum(arrival_rates) / n
-        avg_mem_used = sum(mem_used) / n
-        avg_mem_max = sum(mem_max) / n
-        avg_mem_pct = sum(mem_percent) / n
+    return {
+        'thr': throughputs,
+        'lat': latencies,
+        'size': avg_sizes,
+        'arrival': arrival_rates,
+        'mem_used': mem_used,
+        'mem_max': mem_max,
+        'mem_pct': mem_percent,
+        'n': len(throughputs),
+    }
 
-        with open(output_file, 'w') as f:
-            f.write(f"{avg_thr:.2f},{avg_lat:.2f},{avg_size:.2f},{avg_arrival:.2f},{avg_mem_used:.0f},{avg_mem_max:.0f},{avg_mem_pct:.1f},{n}\n")
-        print(f"Parsed {n} samples: thr={avg_thr:.2f}, lat={avg_lat:.2f}")
-    else:
-        with open(output_file, 'w') as f:
-            f.write("0,0,0,0,0,0,0,0\n")
-        print("No valid samples after warmup skip")
+best_sid = None
+best_data = None
+
+for sid in range(4):
+    log_file = os.path.join(log_dir, f"server_{sid}.log")
+    if not os.path.exists(log_file):
+        continue
+    data = extract_samples(log_file)
+
+    if best_data is None:
+        best_sid = sid
+        best_data = data
+        continue
+
+    # active leader heuristic: choose the log with more valid leader samples
+    # tie-break by average throughput
+    best_thr = (sum(best_data['thr']) / best_data['n']) if best_data['n'] > 0 else -1
+    data_thr = (sum(data['thr']) / data['n']) if data['n'] > 0 else -1
+
+    if data['n'] > best_data['n'] or (data['n'] == best_data['n'] and data_thr > best_thr):
+        best_sid = sid
+        best_data = data
+
+if best_data is not None and best_data['n'] > 0:
+    n = best_data['n']
+    avg_thr = sum(best_data['thr']) / n
+    avg_lat = sum(best_data['lat']) / n
+    avg_size = sum(best_data['size']) / n
+    avg_arrival = sum(best_data['arrival']) / n
+    avg_mem_used = sum(best_data['mem_used']) / n
+    avg_mem_max = sum(best_data['mem_max']) / n
+    avg_mem_pct = sum(best_data['mem_pct']) / n
+
+    with open(output_file, 'w') as f:
+        f.write(f"{avg_thr:.2f},{avg_lat:.2f},{avg_size:.2f},{avg_arrival:.2f},{avg_mem_used:.0f},{avg_mem_max:.0f},{avg_mem_pct:.1f},{n}\n")
+
+    print(f"Parsed active leader server_{best_sid}: {n} samples, thr={avg_thr:.2f}, lat={avg_lat:.2f}")
 else:
     with open(output_file, 'w') as f:
         f.write("0,0,0,0,0,0,0,0\n")
-    print("No metrics found in log")
+    print("No metrics found in any server log")
 PYEOF
 }
 
@@ -276,6 +359,11 @@ echo "Workload: rate=${WORKLOAD_RATE} ops/s, size=${WORKLOAD_SIZE} bytes"
 echo "Leader (Node 0) delays: ${LEADER_DELAYS[*]} ms"
 echo "RequestTimeout values: ${REQUEST_TIMEOUTS[*]} ms"
 echo "Run duration per experiment: ${RUN_DURATION}s"
+echo "Auto confirm: ${AUTO_CONFIRM}"
+echo "Burst mode: ${ENABLE_BURST_MODE}"
+if [[ "$ENABLE_BURST_MODE" == "true" ]]; then
+    echo "  Burst profile: base=${LEADER_DELAYS[0]}ms, spike=${BURST_SPIKE_DELAY_MS}ms, normal=${BURST_NORMAL_SEC}s, spike=${BURST_SPIKE_SEC}s"
+fi
 echo "Results will be saved to: ${EXPERIMENT_DIR}"
 echo "Skip Build: ${SKIP_BUILD}"
 echo "Resume Mode: ${RESUME_MODE}"
@@ -317,7 +405,11 @@ for rt in "${REQUEST_TIMEOUTS[@]}"; do
 done
 echo ""
 
-read -p "Press Enter to start, or Ctrl+C to abort..."
+if [[ "$AUTO_CONFIRM" == "true" ]]; then
+    echo ">>> AUTO_CONFIRM=true, starting benchmark automatically"
+else
+    read -p "Press Enter to start, or Ctrl+C to abort..."
+fi
 
 # ============= 运行实验 =============
 
@@ -327,7 +419,11 @@ echo ">>> Created workload config: rate=${WORKLOAD_RATE}, size=${WORKLOAD_SIZE},
 
 EXPERIMENT_COUNT=0
 SKIPPED_COUNT=0
-ORIGINAL_TIMEOUT=$(grep 'system.totalordermulticast.timeout' config/system.config | awk -F'=' '{print $2}' | tr -d ' ')
+ORIGINAL_TIMEOUT=$(awk -F'=' '/^system.totalordermulticast.timeout[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); print $2; exit}' config/system.config)
+if [[ -z "$ORIGINAL_TIMEOUT" ]]; then
+    echo "ERROR: Failed to read original requestTimeout from config/system.config"
+    exit 1
+fi
 
 # 外层按 leader 延迟分组（减少 tc netem 切换次数）
 for leader_delay in "${LEADER_DELAYS[@]}"; do
@@ -364,14 +460,28 @@ for leader_delay in "${LEADER_DELAYS[@]}"; do
 
         # 运行实验
         LOG_PREFIX="ld${leader_delay}_rt${rt}"
+        BURST_PID=""
+
+        if [[ "$ENABLE_BURST_MODE" == "true" ]]; then
+            echo "    Starting burst injector (base=${leader_delay}ms, spike=${BURST_SPIKE_DELAY_MS}ms)..."
+            BURST_PID=$(start_burst_injector "$leader_delay")
+            sleep 1
+        fi
 
         echo "    Running lan_deploy.sh..."
         ./lan_deploy.sh "$FIXED_BATCH_SIZE" "$FIXED_BATCH_TIMEOUT" -1 "$SKIP_BUILD" "STATIC" "temp_asymmetric_workload.config" > "${EXPERIMENT_DIR}/logs/deploy_${LOG_PREFIX}.log" 2>&1 || {
+            if [[ -n "$BURST_PID" ]]; then
+                stop_burst_injector "$BURST_PID" "$leader_delay"
+            fi
             echo "    WARNING: lan_deploy.sh failed"
             echo "${leader_delay},${rt},${FIXED_BATCH_SIZE},${FIXED_BATCH_TIMEOUT},${WORKLOAD_RATE},${WORKLOAD_SIZE},0,0,0,0,0,0,0,0,0,0" >> "$RESULTS_CSV"
             mark_experiment_done "$EXP_KEY"
             continue
         }
+
+        if [[ -n "$BURST_PID" ]]; then
+            stop_burst_injector "$BURST_PID" "$leader_delay"
+        fi
 
         # 保存所有 server 日志（用于 view change 分析）
         for sid in 0 1 2 3; do
@@ -380,15 +490,10 @@ for leader_delay in "${LEADER_DELAYS[@]}"; do
         cp "results/agent_0.log" "${EXPERIMENT_DIR}/logs/agent_${LOG_PREFIX}.log" 2>/dev/null || true
         cp "results/client.log" "${EXPERIMENT_DIR}/logs/client_${LOG_PREFIX}.log" 2>/dev/null || true
 
-        # 解析主 metrics（从 server_0 / leader 的 agent log）
-        SERVER_LOG="results/server_0.log"
+        # 解析主 metrics（从 4 个 server log 自动选择 active leader）
         METRICS_TMP="${EXPERIMENT_DIR}/logs/metrics_${LOG_PREFIX}.tmp"
-        echo "    Parsing metrics..."
-        parse_server_log "$SERVER_LOG" "$METRICS_TMP"
 
-        # 解析 view change 统计（扫描所有 server logs）
-        VC_TMP="${EXPERIMENT_DIR}/logs/vc_${LOG_PREFIX}.tmp"
-        # Create a temporary directory with symlinks for the parse function
+        # Create a temporary directory with symlinks for parse functions
         VC_LOG_DIR="${EXPERIMENT_DIR}/logs/vc_scan_${LOG_PREFIX}"
         mkdir -p "$VC_LOG_DIR"
         for sid in 0 1 2 3; do
@@ -396,6 +501,12 @@ for leader_delay in "${LEADER_DELAYS[@]}"; do
                 ln -sf "$(realpath "${EXPERIMENT_DIR}/logs/server_${sid}_${LOG_PREFIX}.log")" "${VC_LOG_DIR}/server_${sid}.log"
             fi
         done
+
+        echo "    Parsing metrics..."
+        parse_active_leader_metrics "$VC_LOG_DIR" "$METRICS_TMP"
+
+        # 解析 view change 统计（扫描所有 server logs）
+        VC_TMP="${EXPERIMENT_DIR}/logs/vc_${LOG_PREFIX}.tmp"
         parse_view_changes "$VC_LOG_DIR" "$VC_TMP"
         rm -rf "$VC_LOG_DIR"
 

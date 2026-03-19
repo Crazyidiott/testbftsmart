@@ -10,7 +10,13 @@ for i in "${!REPLICA_NODES_RESOLVED[@]}"; do
 
     echo "    Syncing server_agent directory..."
     remote_ssh "$host" "mkdir -p ${REMOTE_PROJECT_PATH}/server_agent"
-    remote_rsync_to "${LOCAL_PROJECT_PATH}/server_agent/" "$host" "${REMOTE_PROJECT_PATH}/server_agent/" > /dev/null
+    remote_rsync_to \
+        "${LOCAL_PROJECT_PATH}/server_agent/" \
+        "$host" \
+        "${REMOTE_PROJECT_PATH}/server_agent/" \
+        --exclude 'rlenv/' \
+        --exclude '__pycache__/' \
+        > /dev/null
 
     remote_ssh "$host" "
         (
@@ -29,7 +35,9 @@ for i in "${!REPLICA_NODES_RESOLVED[@]}"; do
         echo '    [System] System packages handling complete.'
         echo '    [Venv] Checking virtual environment...'
 
-        if [ ! -f 'rlenv/bin/python3' ] || ! ./rlenv/bin/python3 --version > /dev/null 2>&1; then
+        if [ ! -f 'rlenv/bin/python3' ] \
+            || ! ./rlenv/bin/python3 --version > /dev/null 2>&1 \
+            || ! ./rlenv/bin/python3 -m pip --version > /dev/null 2>&1; then
             echo '        Creating new venv (rlenv)...'
             rm -rf rlenv
             python3 -m venv rlenv
@@ -39,8 +47,8 @@ for i in "${!REPLICA_NODES_RESOLVED[@]}"; do
 
         echo '    [Pip] Installing requirements...'
         if [ -f requirements.txt ]; then
-            ./rlenv/bin/pip install -q --upgrade pip
-            ./rlenv/bin/pip install -q -r requirements.txt
+            ./rlenv/bin/python3 -m pip install -q --upgrade pip
+            ./rlenv/bin/python3 -m pip install -q -r requirements.txt
         else
             echo '        ERROR: requirements.txt missing!'
             exit 1

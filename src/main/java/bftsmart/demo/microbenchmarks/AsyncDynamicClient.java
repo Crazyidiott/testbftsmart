@@ -64,6 +64,10 @@ public class AsyncDynamicClient {
     // ============ 有效发送统计（排除重传） ============
     // 首次发送的请求数（不含重传）
     static AtomicLong totalSentRequests = new AtomicLong(0);
+    static AtomicLong inFlightRequests = new AtomicLong(0);
+    static AtomicLong maxInFlightRequests = new AtomicLong(0);
+    static AtomicLong invokeNanosWindow = new AtomicLong(0);
+    static AtomicLong invokeSamplesWindow = new AtomicLong(0);
     // 实验开始时间
     static long clientExperimentStartTime = 0;
     // ================================================
@@ -132,8 +136,15 @@ public class AsyncDynamicClient {
                 long currentOps = globalOpsCounter.get();
                 long delta = currentOps - lastOps;
                 lastOps = currentOps;
+                long inFlight = inFlightRequests.get();
+                long maxInFlight = maxInFlightRequests.get();
+                long invokeSamples = invokeSamplesWindow.getAndSet(0);
+                long invokeNanos = invokeNanosWindow.getAndSet(0);
+                double avgInvokeUs = invokeSamples > 0 ? (invokeNanos / 1000.0) / invokeSamples : 0.0;
                 if (delta > 0 || currentOps > 0) {
-                    System.out.println("[Total Client Throughput] " + delta + " ops/sec");
+                    System.out.println(String.format(
+                            "[Total Client Throughput] %d ops/sec | inFlight=%d maxInFlight=%d | invokeAvg=%.2f us (%d samples)",
+                            delta, inFlight, maxInFlight, avgInvokeUs, invokeSamples));
                 }
             }
         }, 1000, 1000);
@@ -182,6 +193,7 @@ public class AsyncDynamicClient {
         System.out.println("[Client Workload] Total requests sent (excluding retransmissions): " + totalSent);
         System.out.println("[Client Workload] Experiment duration: " + String.format("%.2f", durationSec) + " seconds");
         System.out.println("[Client Workload] Average send rate: " + String.format("%.2f", avgRate) + " ops/sec");
+        System.out.println("[Client Workload] Peak in-flight requests: " + maxInFlightRequests.get());
         System.out.println("========================================");
         // ==========================================
 
@@ -432,11 +444,17 @@ public class AsyncDynamicClient {
         private void sendRequest() {
             // ============ 统计有效发送（首次发送，不含重传） ============
             AsyncDynamicClient.totalSentRequests.incrementAndGet();
+            long inFlight = AsyncDynamicClient.inFlightRequests.incrementAndGet();
+            AsyncDynamicClient.maxInFlightRequests.accumulateAndGet(inFlight, Math::max);
             // ==========================================================
-            
-            this.serviceProxy.invokeAsynchRequest(this.requestBuffer, new ReplyListener() {
+
+            long invokeStart = System.nanoTime();
+
+            try {
+                this.serviceProxy.invokeAsynchRequest(this.requestBuffer, new ReplyListener() {
 
                 private int replies = 0;
+                private boolean completed = false;
 
                 @Override
                 public void reset() {
@@ -459,12 +477,23 @@ public class AsyncDynamicClient {
 
                     double q = Math.ceil((double) (serviceProxy.getViewManager().getCurrentViewN() + serviceProxy.getViewManager().getCurrentViewF() + 1) / 2.0);
 
-                    if (replies >= q) {
+                    if (!completed && replies >= q) {
+                        completed = true;
                         if (verbose) System.out.println("[RequestContext] clean request context id: " + context.getReqId());
                         serviceProxy.cleanAsynchRequest(context.getOperationId());
+                        AsyncDynamicClient.inFlightRequests.decrementAndGet();
                     }
                 }
-            }, this.reqType);
+                }, this.reqType);
+            } catch (RuntimeException ex) {
+                // If invocation fails before request context is registered, release in-flight slot.
+                AsyncDynamicClient.inFlightRequests.decrementAndGet();
+                throw ex;
+            } finally {
+                long invokeCost = System.nanoTime() - invokeStart;
+                AsyncDynamicClient.invokeNanosWindow.addAndGet(invokeCost);
+                AsyncDynamicClient.invokeSamplesWindow.incrementAndGet();
+            }
             
             // Increment global counter for rate monitoring
             AsyncDynamicClient.globalOpsCounter.incrementAndGet();
