@@ -16,6 +16,7 @@ __pycache__
 py-resdb
 .venv
 results*
+*results/
 benchmark_results*
 lib/
 experiments/
@@ -24,3 +25,5 @@ rlenv/
 lan_ssh_password.txt
 *.txt
 *.csv
+*.json
+*.pkcs12
