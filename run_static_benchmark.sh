@@ -17,7 +17,7 @@
 #     ./run_static_benchmark.sh true <EXPERIMENT_DIR> <KEY>（格式：rate_size_bs_bt）重跑特定实验并在原结果中覆盖（必须是在续跑模式下）
 
 # 示例：
-./run_static_benchmark.sh true experiment_20260205_150000 5000_128_100_50
+# ./run_static_benchmark.sh true experiment_20260205_150000 5000_128_100_50
 #
 # 输出：
 #   - static_benchmark_results/results.csv   : 汇总结果表格
@@ -31,14 +31,14 @@ set -e  # 出错时退出
 
 # 从 trainer.py 中提取的动作空间
 # BatchSize: 100-2000, 步长100 -> [100, 200, 300, ..., 2000] (20个值)
-# BatchTimeout: 50-200, 步长10 -> [50, 60, 70, ..., 200] (16个值)
+# BatchTimeout: 5-100, 步长15 -> [5, 20, 35, ..., 100] (7个值)
 BATCH_SIZE_MIN=100
-BATCH_SIZE_MAX=2000
-BATCH_SIZE_STEP=200
+BATCH_SIZE_MAX=900
+BATCH_SIZE_STEP=100
 
-BATCH_TIMEOUT_MIN=50
-BATCH_TIMEOUT_MAX=200
-BATCH_TIMEOUT_STEP=30
+BATCH_TIMEOUT_MIN=5
+BATCH_TIMEOUT_MAX=100
+BATCH_TIMEOUT_STEP=15
 
 # 是否跳过编译
 SKIP_BUILD="${1:-false}"
@@ -55,7 +55,7 @@ RESUME_DIR="${2:-}"
 FORCE_RERUN_KEY="${3:-}"
 
 # 每个配置的运行时间（秒）- 与 dynamic_workload.config 保持一致
-RUN_DURATION=30
+RUN_DURATION=60
 
 # 结果目录
 RESULTS_DIR="static_benchmark_results"
@@ -140,6 +140,11 @@ create_single_workload_config() {
     local duration=$1
     local rate=$2
     local request_size=$3
+
+    if ! [[ "$duration" =~ ^[0-9]+$ && "$rate" =~ ^[0-9]+$ && "$request_size" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Invalid workload values for temp config: duration=$duration, rate=$rate, size=$request_size"
+        return 1
+    fi
     
     echo "# Duration(s), Rate(ops/sec per thread), RequestSize(bytes)" > "$TEMP_WORKLOAD_CONFIG"
     echo "${duration}, ${rate}, ${request_size}" >> "$TEMP_WORKLOAD_CONFIG"
@@ -281,22 +286,41 @@ echo ">>> Reading workload configurations from ${WORKLOAD_CONFIG}..."
 declare -A UNIQUE_WORKLOADS
 WORKLOAD_ID=0
 
-while IFS=',' read -r duration rate request_size || [ -n "$duration" ]; do
+while IFS= read -r raw_line || [ -n "$raw_line" ]; do
+    # 兼容中文逗号，避免 rate/size 解析为空
+    line=$(echo "$raw_line" | tr '，' ',')
+    line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
     # 跳过注释和空行
-    [[ "$duration" =~ ^#.*$ ]] && continue
-    [[ -z "$duration" ]] && continue
-    
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^#.*$ ]] && continue
+
+    IFS=',' read -r duration rate request_size _ <<< "$line"
+
     # 去除空格
+    duration=$(echo "$duration" | tr -d ' ')
     rate=$(echo "$rate" | tr -d ' ')
     request_size=$(echo "$request_size" | tr -d ' ')
-    
+
+    # 基础校验，过滤格式错误的行
+    if ! [[ "$duration" =~ ^[0-9]+$ && "$rate" =~ ^[0-9]+$ && "$request_size" =~ ^[0-9]+$ ]]; then
+        echo "  WARNING: skip invalid workload line: $raw_line"
+        continue
+    fi
+
     key="${rate}_${request_size}"
-    
+
     if [[ -z "${UNIQUE_WORKLOADS[$key]}" ]]; then
         UNIQUE_WORKLOADS[$key]="$rate,$request_size"
         echo "  Found unique workload: rate=${rate} ops/s, size=${request_size} bytes"
     fi
 done < "$WORKLOAD_CONFIG"
+
+if [[ ${#UNIQUE_WORKLOADS[@]} -eq 0 ]]; then
+    echo "ERROR: No valid workloads found in ${WORKLOAD_CONFIG}"
+    echo "Please ensure each non-comment line follows: duration,rate,request_size"
+    exit 1
+fi
 
 echo ""
 echo "Total unique workloads: ${#UNIQUE_WORKLOADS[@]}"
@@ -343,6 +367,12 @@ WORKLOAD_ID=0
 
 for key in "${!UNIQUE_WORKLOADS[@]}"; do
     IFS=',' read -r rate request_size <<< "${UNIQUE_WORKLOADS[$key]}"
+
+    if ! [[ "$rate" =~ ^[0-9]+$ && "$request_size" =~ ^[0-9]+$ ]]; then
+        echo "  WARNING: skip invalid parsed workload key=$key value=${UNIQUE_WORKLOADS[$key]}"
+        continue
+    fi
+
     WORKLOAD_ID=$((WORKLOAD_ID + 1))
     
     # 用于断点续跑的 workload key
@@ -380,7 +410,7 @@ for key in "${!UNIQUE_WORKLOADS[@]}"; do
             # 日志文件命名：统一使用 workload_bs_bt 格式方便查找
             LOG_PREFIX="w${WORKLOAD_ID}_bs${bs}_bt${bt}"
             
-            ./lan_deploy.sh "$bs" "$bt" -1 "$SKIP_BUILD" "STATIC" "temp_static_workload.config" > "${EXPERIMENT_DIR}/logs/deploy_${LOG_PREFIX}.log" 2>&1 || {
+            ./lan_deploy.sh "$bs" "$bt" "$rate" "$SKIP_BUILD" "STATIC" "temp_static_workload.config" > "${EXPERIMENT_DIR}/logs/deploy_${LOG_PREFIX}.log" 2>&1 || {
                 echo "  WARNING: lan_deploy.sh failed for this experiment"
                 echo "${WORKLOAD_ID},${rate},${request_size},${bs},${bt},0,0,0,0,0,0,0,0" >> "$RESULTS_CSV"
                 # 即使失败也标记为完成，避免重复尝试失败的实验
